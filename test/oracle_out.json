@@ -1,0 +1,29 @@
+{
+ "public_key": "0x77a3b314db07c45076d11f62b6f9e748a39790441823307743cf00d6597ea43",
+ "cases": [
+  {
+   "label": "auth",
+   "hash": "0x6b1982860764c9f978c995d35c74a276e3d70e52f5f032fba855525211d5426",
+   "r": "0x748a39695c3c55aec55904f86ecc1fe2f81bf3b46d5b9b7d39bca5a82d78a21",
+   "s": "0x2183e5477f8133883e9a726d6b9e836b062011bde3dde5782111149c2c00787"
+  },
+  {
+   "label": "order:limit-buy",
+   "hash": "0x66766693a123ccdcd4a4909c6e0f6a2cb84e47d7f1b3a2737b49ab1f957a846",
+   "r": "0x5331ce42dbee2cedfab03b2a175055f34bc2d7f7583d907ad93f3acc4019fd1",
+   "s": "0x7d3dedf1a3327f59f8e840757e8753eb66fe16b5b551fe612d88def5ba9a26c"
+  },
+  {
+   "label": "order:limit-sell",
+   "hash": "0x419ba32e63c38dfa00d276ec83cf4c56b2f974eca5917ec3cc4453b71d6b049",
+   "r": "0x7ce64c1e05b03502b016082afdb45aa4881def27975971f8e6103ef828b9a61",
+   "s": "0x7ac79d0ac1ce28d3355483bd9d574d026487b7c76d1376c09effef4728d6c2c"
+  },
+  {
+   "label": "order:market-buy",
+   "hash": "0x45bf6c396fec27a44260b094beb69d1729b86616e7a0851fbc286da63fb6c3",
+   "r": "0x1d41403673d3167ec3c60f9515de7b419d6d19fce8b4be42197d066b6ffe7e0",
+   "s": "0x5d4c8b24c1023744de10b88f503618ce6341ebac0aa425c981742e6f7619ef5"
+  }
+ ]
+}

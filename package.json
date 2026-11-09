@@ -1,0 +1,53 @@
+{
+  "name": "dts-bot",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test/test.mjs && node test/client.test.mjs && node test/executor.test.mjs && node --import ./test/stubs/register.mjs test/worker.test.mjs",
+    "test:executor": "node test/executor.test.mjs",
+    "check": "node --env-file=.env.local scripts/testnet-check.mjs",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test:client": "node test/client.test.mjs",
+    "test:worker": "node --import ./test/stubs/register.mjs test/worker.test.mjs"
+  },
+  "dependencies": {
+    "@scure/starknet": "^1.1.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "license": "Apache-2.0",
+  "description": "DTS bot: TradingView signals executed on Paradex from your own Cloudflare account, with a Telegram kill switch.",
+  "cloudflare": {
+    "label": "DTS bot",
+    "products": [
+      "Workers",
+      "Durable Objects"
+    ],
+    "bindings": {
+      "PARADEX_ACCOUNT": {
+        "description": "Your Paradex **account address** (starts with `0x`), from Apple Passwords. Not a key. Not ready yet? Type `later`."
+      },
+      "PARADEX_PRIVATE_KEY": {
+        "description": "The **trade-only subkey** you created in the Paradex app (testnet first), from Apple Passwords. Never your wallet key. Not ready yet? Type `later`."
+      },
+      "TELEGRAM_BOT_TOKEN": {
+        "description": "The **Telegram bot token** BotFather gave you, from Apple Passwords (user name `Telegram bot token`)."
+      },
+      "SIGNAL_SECRET": {
+        "description": "Your **Signal secret** from Apple Passwords (website `dts.bot`). TradingView sends it with every alert."
+      },
+      "ADMIN_TOKEN": {
+        "description": "Your **Admin token** from Apple Passwords (website `dts.bot`). Your master password for the bot."
+      },
+      "CONTROL": {
+        "description": "The halt switch. Nothing to fill in."
+      },
+      "ENGINE": {
+        "description": "The trading engine, one per market. Nothing to fill in."
+      }
+    }
+  }
+}

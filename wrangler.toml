@@ -1,0 +1,45 @@
+# DTS bot: the settings below are changed by pull request, never by hand on the server.
+name = "dts-bot"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+PARADEX_ENV = "testnet"          # "testnet" until every go-live drill has passed; then "prod" by reviewed pull request
+MARKET = "BTC-USD-PERP"
+PARADEX_INTERACTIVE = "true"     # Retail token: zero fees, RPI liquidity (Track A, taker method)
+
+# Telegram: filled in by Claude (pull request) from the numbers /start gives you
+TELEGRAM_CHAT_ID = ""
+TELEGRAM_USER_IDS = ""           # comma-separated; only these people can command the bot
+
+# Track A executor
+EXEC_MODE = "taker"              # "taker" first; "maker" = post-only at the touch + IOC fallback
+ORDER_SIZE = "0.001"             # position size per signal
+MAX_SLIPPAGE_BPS = "20"
+TAKER_ATTEMPTS = "3"
+MAKER_WINDOW_MS = "60000"
+MAKER_REPOSTS = "4"
+
+# Risk limits: the bot refuses to trade if either is missing
+MAX_POSITION = "0.002"           # hard cap on |position|, checked before every order
+MAX_DAILY_LOSS = "50"            # USD drop in account value since 00:00 UTC that halts the bot
+FLATTEN_CAP_BPS = "100"          # /flatten: IOC limit at most 1% beyond the touch
+
+[[durable_objects.bindings]]
+name = "CONTROL"
+class_name = "Control"
+
+[[durable_objects.bindings]]
+name = "ENGINE"
+class_name = "Engine"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Control", "Engine"]
+
+[observability]
+enabled = true
+
+# Secrets are never written here. The Deploy to Cloudflare form asks for them (see .dev.vars.example);
+# later changes go through the Cloudflare dashboard: Workers > dts-bot > Settings > Variables and Secrets.

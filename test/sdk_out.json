@@ -1,0 +1,21 @@
+{
+ "sdk": "paradex-py",
+ "cases": [
+  {
+   "label": "auth",
+   "hash": "0x6b1982860764c9f978c995d35c74a276e3d70e52f5f032fba855525211d5426"
+  },
+  {
+   "label": "order:limit-buy",
+   "hash": "0x66766693a123ccdcd4a4909c6e0f6a2cb84e47d7f1b3a2737b49ab1f957a846"
+  },
+  {
+   "label": "order:limit-sell",
+   "hash": "0x419ba32e63c38dfa00d276ec83cf4c56b2f974eca5917ec3cc4453b71d6b049"
+  },
+  {
+   "label": "order:market-buy",
+   "hash": "0x45bf6c396fec27a44260b094beb69d1729b86616e7a0851fbc286da63fb6c3"
+  }
+ ]
+}

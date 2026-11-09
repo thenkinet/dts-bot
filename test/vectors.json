@@ -1,0 +1,17 @@
+{
+  "private_key": "0x3c1e9550e66958296d11b60f8e8e7a7ad990d07fa65d5f7652c4a6c87d4e3cc",
+  "account_address": "0x5a9c6f1e3b7d2c4a8e0f1b2d3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c",
+  "chain_id_str": "PRIVATE_SN_POTC_SEPOLIA",
+  "auth": {"timestamp": 1761768000, "expiration": 1761854400},
+  "orders": [
+    {"label": "limit-buy", "timestamp": 1761768000123, "market": "BTC-USD-PERP", "side": "BUY",
+     "orderType": "LIMIT", "size": "0.0015", "price": "81359.8",
+     "size_q": "150000", "price_q": "8135980000000"},
+    {"label": "limit-sell", "timestamp": 1761768000456, "market": "ETH-USD-PERP", "side": "SELL",
+     "orderType": "LIMIT", "size": "0.25", "price": "3120.45",
+     "size_q": "25000000", "price_q": "312045000000"},
+    {"label": "market-buy", "timestamp": 1761768000789, "market": "BTC-USD-PERP", "side": "BUY",
+     "orderType": "MARKET", "size": "0.002", "price": "0",
+     "size_q": "200000", "price_q": "0"}
+  ]
+}
