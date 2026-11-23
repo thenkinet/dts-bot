@@ -381,7 +381,7 @@ export default {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ commands: [
           { command: 'status', description: 'Position, limits, last signal' },
-          { command: 'check', description: 'Testnet check: tiny order, read back, cancel' },
+          { command: 'check', description: 'Check: tiny order far from the price, cancelled' },
           { command: 'killall', description: 'Halt and cancel every order' },
           { command: 'flatten', description: 'While halted: close positions' },
           { command: 'resume', description: 'Lift the halt' },
@@ -470,12 +470,10 @@ export default {
           await telegram(env, 'Linked. Commands: /status, /check, /killall, /flatten, /resume.');
         }
         if (cmd === '/check') {
-          if (env.PARADEX_ENV === 'prod') { await telegram(env, '/check runs on the testnet only.'); }
-          else {
-            const lines = [];
-            try { await runCheck(paradex(env), env.MARKET, (...a) => lines.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '))); } catch { /* failing step already logged */ }
-            await telegram(env, `Testnet check:\n${lines.join('\n').slice(0, 3500)}`);
-          }
+          // A post-only bid 10% below the market cannot fill; it is cancelled at once.
+          const lines = [];
+          try { await runCheck(paradex(env), env.MARKET, (...a) => lines.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '))); } catch { /* failing step already logged */ }
+          await telegram(env, `Check on Paradex ${env.PARADEX_ENV}:\n${lines.join('\n').slice(0, 3500)}`);
         }
         if (cmd === '/status') {
           const s = await controlCall(env, '');
