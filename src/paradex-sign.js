@@ -58,7 +58,11 @@ export function authHash(chainIdStr, account, timestamp, expiration) {
   });
 }
 
-// order: { timestamp(ms), market, side: 'BUY'|'SELL', orderType: 'LIMIT'|'MARKET', size, price }
+// Order types that carry a limit price; every other type (MARKET, STOP_MARKET, ...) signs a price of 0,
+// as the official SDK does (paradex_py.common.order.Order.is_limit_type).
+export const LIMIT_TYPES = ['LIMIT', 'STOP_LIMIT', 'TAKE_PROFIT_LIMIT', 'STOP_LOSS_LIMIT'];
+
+// order: { timestamp(ms), market, side: 'BUY'|'SELL', orderType: 'LIMIT'|'MARKET'|'STOP_MARKET'|..., size, price }
 export function orderHash(chainIdStr, account, o) {
   return messageHash(chainIdStr, account, 'Order', ORDER_FIELDS, {
     timestamp: String(o.timestamp),
@@ -66,7 +70,7 @@ export function orderHash(chainIdStr, account, o) {
     side: o.side === 'BUY' ? '1' : '2',
     orderType: o.orderType,
     size: quantize8(o.size),
-    price: o.orderType === 'MARKET' ? '0' : quantize8(o.price),
+    price: LIMIT_TYPES.includes(o.orderType) ? quantize8(o.price) : '0',
   });
 }
 

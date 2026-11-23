@@ -1,7 +1,7 @@
 // Minimal Paradex REST client for the DTS starter kit.
 // Works in Node 20+ and in Cloudflare Workers (both have fetch).
 // Message schemas match Paradex's official SDK (paradex-py); see test/sdk_oracle.py.
-import { authHash, orderHash, signHash, quantize8, publicKeyOf } from './paradex-sign.js';
+import { authHash, orderHash, signHash, quantize8, publicKeyOf, LIMIT_TYPES } from './paradex-sign.js';
 
 export const BASES = {
   testnet: 'https://api.testnet.paradex.trade/v1',
@@ -155,7 +155,7 @@ export class Paradex {
     return { bid: clean(ob.bids?.[0]?.[0]), ask: clean(ob.asks?.[0]?.[0]), raw: ob };
   }
 
-  // o: { market, side: 'BUY'|'SELL', type: 'LIMIT'|'MARKET', size, price,
+  // o: { market, side: 'BUY'|'SELL', type: 'LIMIT'|'MARKET'|'STOP_MARKET', size, price, triggerPrice?,
   //      instruction: 'POST_ONLY'|'GTC'|'IOC', flags?: ['REDUCE_ONLY'], clientId? }
   // Never retried blindly (review D5). Without a client id: one attempt. With one: after a
   // 429, 5xx or timeout, it first asks Paradex whether the order exists
@@ -185,9 +185,12 @@ export class Paradex {
       timestamp: ts, market: o.market, side: o.side, orderType: type, size: o.size, price: o.price,
     }), this.privateKey);
     const body = {
-      market: o.market, side: o.side, type, size: o.size, price: type === 'MARKET' ? '0' : o.price,
+      market: o.market, side: o.side, type, size: o.size,
       instruction: o.instruction || 'POST_ONLY', signature: sig.wire, signature_timestamp: ts,
     };
+    if (LIMIT_TYPES.includes(type)) body.price = o.price;
+    else if (type === 'MARKET') body.price = '0';
+    if (o.triggerPrice !== undefined) body.trigger_price = o.triggerPrice;
     if (o.flags) body.flags = o.flags;
     if (o.clientId) body.client_id = o.clientId;
     return this.priv('POST', '/orders', { body, idempotent: false });

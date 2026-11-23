@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test/test.mjs && node test/client.test.mjs && node test/executor.test.mjs && node --import ./test/stubs/register.mjs test/worker.test.mjs",
+    "test": "node test/test.mjs && node test/client.test.mjs && node test/executor.test.mjs && node --import ./test/stubs/register.mjs test/worker.test.mjs && node test/disaster.test.mjs",
     "test:executor": "node test/executor.test.mjs",
     "check": "node --env-file=.env.local scripts/testnet-check.mjs",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "test:client": "node test/client.test.mjs",
-    "test:worker": "node --import ./test/stubs/register.mjs test/worker.test.mjs"
+    "test:worker": "node --import ./test/stubs/register.mjs test/worker.test.mjs",
+    "test:disaster": "node test/disaster.test.mjs"
   },
   "dependencies": {
     "@scure/starknet": "^1.1.0"

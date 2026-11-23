@@ -25,6 +25,7 @@ MAKER_REPOSTS = "4"
 MAX_POSITION = "0.0004"          # hard cap on |position| (~$25), checked before every order
 MAX_DAILY_LOSS = "10"            # USD drop in account value since 00:00 UTC that halts the bot
 FLATTEN_CAP_BPS = "100"          # /flatten: IOC limit at most 1% beyond the touch
+DISASTER_STOP_BPS = "500"        # every position carries a reduce-only stop 5% beyond its entry, resting at Paradex
 
 [[durable_objects.bindings]]
 name = "CONTROL"
