@@ -1,5 +1,5 @@
-// The testnet check: log in, place one tiny post-only bid far below the
-// market (so it cannot fill), read it back, cancel it, read it back.
+// The check: log in, place one tiny post-only bid 10% below the market (so it cannot
+// fill), read it back, cancel it, read it back. Safe on the testnet and on the real network.
 // Used by scripts/testnet-check.mjs (Node) and by the Worker's /check route.
 import { floorToTick, ceilToStep } from './paradex-client.js';
 
@@ -16,8 +16,6 @@ export async function runCheck(px, symbol, log = console.log) {
       throw e;
     }
   };
-
-  if (px.env === 'prod') throw new Error('runCheck is for the testnet only');
 
   await step('1. read system config (chain id)', async () => (await px.init(), { chainId: px.chainId }));
   await step('2. log in and receive a JWT', async () => ({ jwtLength: (await px.login()).length }));
