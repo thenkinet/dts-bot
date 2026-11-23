@@ -4,7 +4,7 @@ Your TradingView alerts, executed on Paradex by a bot that runs in **your own Cl
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/thenkinet/dts-bot)
 
-> **Status: testnet only.** This code has passed its offline tests but has not yet traded on Paradex's testnet. Do not point it at real money until every acceptance test and go-live drill has passed (see `docs/TECHNICAL.md`, section 7).
+> **Status: early, on the real Paradex at minimum size.** Paradex's testnet could not fund new accounts in November 2026, so this repository's settings point at the real network with tiny limits (orders of about $12, position at most about $25, $10 daily loss). It only trades when a signal arrives. Use an account holding only what you accept to lose, and run the drills in `docs/TECHNICAL.md`, section 7, before connecting signals.
 
 ## What the button does
 

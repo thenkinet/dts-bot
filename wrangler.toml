@@ -5,7 +5,7 @@ compatibility_date = "2026-10-01"
 workers_dev = true
 
 [vars]
-PARADEX_ENV = "testnet"          # "testnet" until every go-live drill has passed; then "prod" by reviewed pull request
+PARADEX_ENV = "prod"             # real Paradex (the testnet could not fund new accounts in Nov 2026); tiny limits below
 MARKET = "BTC-USD-PERP"
 PARADEX_INTERACTIVE = "true"     # Retail token: zero fees, RPI liquidity (Track A, taker method)
 
@@ -15,15 +15,15 @@ PARADEX_INTERACTIVE = "true"     # Retail token: zero fees, RPI liquidity (Track
 
 # Track A executor
 EXEC_MODE = "taker"              # "taker" first; "maker" = post-only at the touch + IOC fallback
-ORDER_SIZE = "0.001"             # position size per signal
+ORDER_SIZE = "0.0002"            # position size per signal (~$12; Paradex minimum order is $10)
 MAX_SLIPPAGE_BPS = "20"
 TAKER_ATTEMPTS = "3"
 MAKER_WINDOW_MS = "60000"
 MAKER_REPOSTS = "4"
 
 # Risk limits: the bot refuses to trade if either is missing
-MAX_POSITION = "0.002"           # hard cap on |position|, checked before every order
-MAX_DAILY_LOSS = "50"            # USD drop in account value since 00:00 UTC that halts the bot
+MAX_POSITION = "0.0004"          # hard cap on |position| (~$25), checked before every order
+MAX_DAILY_LOSS = "10"            # USD drop in account value since 00:00 UTC that halts the bot
 FLATTEN_CAP_BPS = "100"          # /flatten: IOC limit at most 1% beyond the touch
 
 [[durable_objects.bindings]]
