@@ -2,18 +2,19 @@
 //   GET  /health     liveness, plus which secrets are set (names only, never values)
 //   GET  /probe      can Cloudflare reach Paradex? No key needed (answers review point F5)
 //   GET  /setup      one-time page: links Telegram to this bot (asks for the admin token)
-//   GET  /check      the Paradex testnet check (header x-admin-token required)
+//   GET  /check      the Paradex check: tiny orders far from the price, cancelled (header x-admin-token required)
 //   POST /alert      relays a TradingView/MMT test alert to Telegram (secret + fresh ts in the body)
 //   POST /signal     Track A: a directional signal {id, side: long|short|flat, price?, size?} for the Engine
 //   GET  /engine     the Engine's state: last report, target, queue (header x-admin-token required)
 //   POST /telegram   Telegram webhook, allowed chat only:
-//                    /status, /killall (halt + cancel all + verify), /flatten (capped reduce-only IOC, needs halt), /resume
+//                    /status, /check, /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
 //                    (allowed chat AND allowed sender ids)
 import { DurableObject } from 'cloudflare:workers';
 import { Paradex, BASES } from './paradex-client.js';
 import { runCheck } from './check.js';
 import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
+import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -64,6 +65,7 @@ const RECONCILE_MS = 60_000;
 const RETRY_MS = 10_000;              // a signal that could not start is retried this soon
 const MAX_START_TRIES = 3;
 const SEEN_TTL_MS = 7 * 86_400_000;   // idempotency keys kept 7 days
+const stopBps = (env) => Number(env.DISASTER_STOP_BPS || DEFAULT_STOP_BPS);
 
 // Settings the Engine refuses to trade without (review D2, D6).
 function missingSettings(env) {
@@ -180,8 +182,12 @@ export class Engine extends DurableObject {
       console.log(JSON.stringify({ event: 'engine.executed', report }));
       const fills = report.legs.flatMap((l) => l.fills.map((f) => `${l.side} ${f.size} @ ${f.price} (${f.method}, ${f.slippageBps} bp)`));
       const why = report.refused || report.stopped || report.legs.map((l) => l.stopped).filter(Boolean).join('; ');
+      // Every position gets its disaster stop at Paradex right after execution.
+      let stopLine;
+      try { stopLine = describeStop(await syncDisasterStop(this.px(), env.MARKET, { bps: stopBps(env) })); }
+      catch (e) { stopLine = `DISASTER STOP FAILED: ${String(e.message || e).slice(0, 200)}. Check the position now.`; }
       await telegram(env, `${report.ok ? 'Done' : 'INCOMPLETE'}: ${sig.id} ${sig.side}. Position ${report.before} -> ${report.after} (target ${report.target}).`
-        + (fills.length ? `\n${fills.join('\n')}` : '') + (report.ok ? '' : `\nGap ${report.gap ?? report.target}. ${why}`));
+        + (fills.length ? `\n${fills.join('\n')}` : '') + (report.ok ? '' : `\nGap ${report.gap ?? report.target}. ${why}`) + `\n${stopLine}`);
     } catch (e) {
       await st.put('last', { signalId: sig.id, error: String(e.message || e) });
       await telegram(env, `Signal ${sig.id} FAILED: ${String(e.message || e).slice(0, 300)}`);
@@ -243,6 +249,14 @@ export class Engine extends DurableObject {
       if (Number(env.MAX_DAILY_LOSS) > 0) await this.dailyLoss();
     } catch (e) {
       console.log(JSON.stringify({ event: 'engine.reconcile_failed', error: String(e.message || e) }));
+    }
+    // Every minute: a position without its disaster stop gets one; a stop without a position goes.
+    try {
+      const s = await syncDisasterStop(this.px(), env.MARKET, { bps: stopBps(env) });
+      if (s.action === 'placed' || s.action === 'cancelled') await telegram(env, `RECONCILE: ${describeStop(s)}`);
+    } catch (e) {
+      const msg = String(e.message || e).slice(0, 200);
+      if ((await st.get('stopAlerted')) !== msg) { await st.put('stopAlerted', msg); await telegram(env, `RECONCILE: DISASTER STOP FAILED: ${msg}`); }
     }
     const old = [...(await st.list({ prefix: 'seen:' })).entries()].filter(([, at]) => Date.now() - at > SEEN_TTL_MS).map(([k]) => k);
     for (let i = 0; i < old.length; i += 128) await st.delete(old.slice(i, i + 128));
@@ -308,7 +322,11 @@ async function killAll(env) {
     open = list(await px.openOrders());
     if (open.length === 0) break;
   }
-  return { halted: Boolean(halt.halted), openOrdersLeft: open.length };
+  // Cancelling everything also removed the disaster stops: put them back on any open position.
+  let protection;
+  try { protection = open.length === 0 ? describeStop(await syncDisasterStop(px, env.MARKET, { bps: stopBps(env) })) : 'not re-placed: orders still open'; }
+  catch (e) { protection = `DISASTER STOP FAILED: ${String(e.message || e).slice(0, 200)}`; }
+  return { halted: Boolean(halt.halted), openOrdersLeft: open.length, protection };
 }
 
 // Closes each open position with a reduce-only IOC LIMIT order capped FLATTEN_CAP_BPS (default
@@ -339,6 +357,7 @@ async function flatten(env) {
     sent.push({ market: p.market, side, size, price, id: r.id });
   }
   await new Promise((r) => setTimeout(r, 1500));                  // Retail processing delay, with margin
+  try { await syncDisasterStop(px, env.MARKET, { bps: stopBps(env) }); } catch { /* the minute check retries */ }
   const left = list(await px.positions())
     .filter((p) => Number(p.size ?? 0) !== 0 && (!p.status || p.status === 'OPEN'))
     .map((p) => `${p.market} ${p.side || ''} ${p.size}`);
@@ -483,9 +502,9 @@ export default {
         }
         if (cmd === '/killall') {
           const r = await killAll(env);
-          await telegram(env, r.openOrdersLeft === 0
+          await telegram(env, (r.openOrdersLeft === 0
             ? 'Kill switch: HALTED, all orders cancelled and verified. Positions untouched; /flatten to close them.'
-            : `Kill switch: HALTED, but ${r.openOrdersLeft} order(s) still open after 3 checks. Act manually now.`);
+            : `Kill switch: HALTED, but ${r.openOrdersLeft} order(s) still open after 3 checks. Act manually now.`) + `\n${r.protection}`);
         }
         if (cmd === '/flatten') {
           const r = await flatten(env);
