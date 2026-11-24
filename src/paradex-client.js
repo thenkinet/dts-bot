@@ -201,7 +201,9 @@ export class Paradex {
   }
 
   getOrderByClientId(clientId) { return this.priv('GET', `/orders/by_client_id/${encodeURIComponent(clientId)}`); }
-  account() { return this.priv('GET', '/account'); }           // account_value, free_collateral, ...
+  // Named accountInfo, not account: this.account holds the account address, and an instance
+  // property would hide a method of the same name (it did: "account is not a function").
+  accountInfo() { return this.priv('GET', '/account'); }       // account_value, free_collateral, ...
 
   getOrder(id) { return this.priv('GET', `/orders/${id}`); }
   openOrders(market) { return this.priv('GET', market ? `/orders?market=${encodeURIComponent(market)}` : '/orders'); }

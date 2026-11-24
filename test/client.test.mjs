@@ -75,5 +75,18 @@ const posts = (log) => log.filter((l) => l === 'POST /orders').length;
     seen[0] === '/v1/bbo/BTC-USD-PERP/interactive' && seen[1] === '/v1/bbo/BTC-USD-PERP' && b.bid === '60130.2', seen.join(' | '));
 }
 
+{ // The account address and the account-info call must not collide (bug seen live on 24 Nov 2026)
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const p = new URL(url).pathname; seen.push(p);
+    const body = p.endsWith('/system/config') ? { starknet_chain_id: V.chain_id_str } : p.includes('/auth/') ? { jwt_token: 'jwt' } : { account_value: '150.25' };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const c = new Paradex({ env: 'prod', account: V.account_address, privateKey: V.private_key, interactive: true });
+  const info = await c.accountInfo();
+  check('accountInfo() reads GET /account, and the address stays a string',
+    typeof c.accountInfo === 'function' && typeof c.account === 'string' && info.account_value === '150.25' && seen.at(-1) === '/v1/account');
+}
+
 console.log(fail ? `\n${fail} client check(s) failed` : '\nAll client checks passed');
 process.exit(fail ? 1 : 0);
