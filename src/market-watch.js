@@ -24,8 +24,10 @@ export const binanceSymbol = (market, override) => override || `${String(market)
 const SOURCES = [
   { name: 'Binance perp', url: (s) => `https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol=${s}` },
   { name: 'Binance spot', url: (s) => `https://data-api.binance.vision/api/v3/ticker/bookTicker?symbol=${s}` },
+  { name: 'Binance spot (api)', url: (s) => `https://api.binance.com/api/v3/ticker/bookTicker?symbol=${s}` },
 ];
 let perpRefused = false;   // remembered per instance: no point asking again every minute
+let lastBinanceError = null;   // why the last attempt failed, shown by /spread
 
 async function timedJson(url, fetchFn, timeoutMs = 3000) {
   const ctl = new AbortController();
@@ -39,17 +41,21 @@ async function timedJson(url, fetchFn, timeoutMs = 3000) {
 }
 
 export async function binanceBook(symbol, fetchFn = fetch) {
+  const why = [];
   for (const src of SOURCES) {
-    if (src.name === 'Binance perp' && perpRefused) continue;
+    if (src.name === 'Binance perp' && perpRefused) { why.push(`${src.name}: refused earlier`); continue; }
     try {
       const r = await timedJson(src.url(symbol), fetchFn);
-      if (r.status === 451 || r.status === 403) { if (src.name === 'Binance perp') perpRefused = true; continue; }
-      if (r.json && Number(r.json.bidPrice) > 0) return { source: src.name, bid: Number(r.json.bidPrice), ask: Number(r.json.askPrice), ms: r.ms };
-    } catch { /* try the next source */ }
+      if (r.json && Number(r.json.bidPrice) > 0) { lastBinanceError = null; return { source: src.name, bid: Number(r.json.bidPrice), ask: Number(r.json.askPrice), ms: r.ms }; }
+      if (src.name === 'Binance perp' && (r.status === 451 || r.status === 403)) perpRefused = true;
+      why.push(`${src.name}: HTTP ${r.status}`);
+    } catch (e) { why.push(`${src.name}: ${e.name === 'AbortError' ? 'timeout' : String(e.message || e).slice(0, 80)}`); }
   }
+  lastBinanceError = why.join('; ');
   return null;
 }
-export const _resetBinance = () => { perpRefused = false; };
+export const binanceError = () => lastBinanceError;
+export const _resetBinance = () => { perpRefused = false; lastBinanceError = null; };
 
 // One sample: Paradex book (the view the bot trades on) and Binance book, with response times.
 export async function takeSample(px, market, { symbol, fetchFn = fetch, now = Date.now } = {}) {
@@ -76,14 +82,15 @@ export function summarise(samples) {
 }
 
 export function describeNow(s) {
-  if (!s?.pd || !s?.bn) return `Now: ${!s?.pd ? 'Paradex' : 'Binance'} price unavailable.`;
+  if (!s?.pd) return 'Now: Paradex price unavailable.';
+  if (!s?.bn) return `Now: Binance price unavailable from where the engine runs (${lastBinanceError || 'no answer'}).`;
   const pm = mid(s.pd.bid, s.pd.ask), bm = mid(s.bn.bid, s.bn.ask);
   return `Now: Paradex ${s.pd.bid}/${s.pd.ask} (spread ${(s.pd.ask - s.pd.bid).toFixed(2)}), ${s.bn.source} ${s.bn.bid}/${s.bn.ask} (spread ${(s.bn.ask - s.bn.bid).toFixed(2)}).`
     + `\nGap: Paradex is ${f1(bps(pm, bm))} bp vs Binance (${(pm - bm).toFixed(1)} USD).`;
 }
 
 export function describeSummary(label, m) {
-  if (!m.n) return `${label}: no samples yet.`;
+  if (!m.n) return `${label}: no complete samples yet (each needs both prices).`;
   return `${label} (${m.n} samples, ${m.source}): gap ${f1(m.gapMean)} bp on average (from ${f1(m.gapMin)} to ${f1(m.gapMax)}). `
     + `Spread: Paradex ${m.pdSpread.toFixed(2)} bp, Binance ${m.bnSpread.toFixed(2)} bp. Response: Paradex ${secs(m.pdMs)}, Binance ${secs(m.bnMs)}.`;
 }

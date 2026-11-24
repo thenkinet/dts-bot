@@ -22,6 +22,13 @@ await t('Binance perp first; on HTTP 451 falls back to spot and stops asking per
   assert.ok(seen.every((u) => !u.includes('fapi')));
 });
 
+await t('All Binance sources failing: /spread says why', async () => {
+  _resetBinance();
+  const a = await binanceBook('BTCUSDT', async (url) => json({}, url.includes('fapi') ? 451 : 403));
+  assert.equal(a, null);
+  assert.match(describeNow({ pd: { bid: 1, ask: 2 }, bn: null }), /Binance perp: HTTP 451; Binance spot: HTTP 403; Binance spot \(api\): HTTP 403/);
+});
+
 await t('Binance perp used when it answers', async () => {
   _resetBinance();
   const a = await binanceBook('BTCUSDT', async () => json({ bidPrice: '59925.6', askPrice: '59925.7' }));
