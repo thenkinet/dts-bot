@@ -64,5 +64,16 @@ const posts = (log) => log.filter((l) => l === 'POST /orders').length;
   check('D5 no client id: a single POST, never retried', threw && posts(log) === 1);
 }
 
+{ // Retail token: best prices come from the interactive view (includes RPI liquidity)
+  const seen = [];
+  globalThis.fetch = async (url) => { seen.push(new URL(url).pathname); return new Response(JSON.stringify({ bid: '60130.2', ask: '60139.3' }), { status: 200 }); };
+  const retail = new Paradex({ env: 'prod', account: V.account_address, privateKey: V.private_key, interactive: true });
+  const b = await retail.bestPrices('BTC-USD-PERP');
+  const plain = new Paradex({ env: 'prod', account: V.account_address, privateKey: V.private_key });
+  await plain.bestPrices('BTC-USD-PERP');
+  check('Retail token reads /bbo/{market}/interactive; a plain token reads /bbo/{market}',
+    seen[0] === '/v1/bbo/BTC-USD-PERP/interactive' && seen[1] === '/v1/bbo/BTC-USD-PERP' && b.bid === '60130.2', seen.join(' | '));
+}
+
 console.log(fail ? `\n${fail} client check(s) failed` : '\nAll client checks passed');
 process.exit(fail ? 1 : 0);

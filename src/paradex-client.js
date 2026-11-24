@@ -145,13 +145,17 @@ export class Paradex {
 
   // Best bid and ask. A side with no orders is null: Paradex reports it as "0"
   // (seen on the testnet, where the book is thin). Falls back to a depth-1 order book.
+  // With a Retail (interactive) token we read Paradex's interactive view, which includes the RPI
+  // liquidity a Retail order can trade against. The plain view shows API orders only: on the real
+  // BTC market it can show a best bid 0.8% below the price that Retail orders actually fill at.
   async bestPrices(symbol) {
     const clean = (p) => (p !== undefined && p !== null && Number(p) > 0 ? String(p) : null);
+    const view = this.interactive ? '/interactive' : '';
     try {
-      const b = await call(this.base, 'GET', `/bbo/${symbol}`);
+      const b = await call(this.base, 'GET', `/bbo/${symbol}${view}`);
       return { bid: clean(b.bid), ask: clean(b.ask), raw: b };
     } catch { /* fall through */ }
-    const ob = await call(this.base, 'GET', `/orderbook/${symbol}?depth=1`);
+    const ob = await call(this.base, 'GET', `/orderbook/${symbol}${view}?depth=1`);
     return { bid: clean(ob.bids?.[0]?.[0]), ask: clean(ob.asks?.[0]?.[0]), raw: ob };
   }
 
