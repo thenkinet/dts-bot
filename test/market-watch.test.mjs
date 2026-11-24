@@ -1,0 +1,83 @@
+// Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
+import assert from 'node:assert/strict';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol } from '../src/market-watch.js';
+
+let fails = 0;
+const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
+const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json' } });
+
+await t('Binance symbol from the Paradex market, unless overridden', () => {
+  assert.equal(binanceSymbol('BTC-USD-PERP'), 'BTCUSDT');
+  assert.equal(binanceSymbol('ETH-USD-PERP', 'ETHUSDC'), 'ETHUSDC');
+});
+
+await t('Binance perp first; on HTTP 451 falls back to spot and stops asking perp', async () => {
+  _resetBinance();
+  const seen = [];
+  const f = async (url) => { seen.push(url); return url.includes('fapi') ? json({ code: 0 }, 451) : json({ bidPrice: '100.00', askPrice: '100.02' }); };
+  const a = await binanceBook('BTCUSDT', f);
+  assert.equal(a.source, 'Binance spot'); assert.equal(a.bid, 100);
+  seen.length = 0;
+  await binanceBook('BTCUSDT', f);
+  assert.ok(seen.every((u) => !u.includes('fapi')));
+});
+
+await t('Binance perp used when it answers', async () => {
+  _resetBinance();
+  const a = await binanceBook('BTCUSDT', async () => json({ bidPrice: '59925.6', askPrice: '59925.7' }));
+  assert.equal(a.source, 'Binance perp');
+});
+
+await t('Summary: gap in bp, spreads, skips incomplete samples', () => {
+  const s = [
+    { t: 1, pd: { bid: 99.9, ask: 100.1, ms: 50 }, bn: { bid: 100.09, ask: 100.11, source: 'Binance perp', ms: 20 } },
+    { t: 2, pd: { bid: 99.9, ask: 100.1, ms: 70 }, bn: { bid: 99.89, ask: 99.91, source: 'Binance perp', ms: 30 } },
+    { t: 3, pd: null, bn: { bid: 1, ask: 2, ms: 10 } },
+  ];
+  const m = summarise(s);
+  assert.equal(m.n, 2);
+  assert.ok(Math.abs(m.gapMean) < 0.05);                  // -10 bp and +10 bp average to 0
+  assert.ok(Math.abs(m.gapMin + 9.99) < 0.05 && Math.abs(m.gapMax - 10.01) < 0.05);
+  assert.ok(Math.abs(m.pdSpread - 20) < 0.01);
+  assert.equal(m.pdMs, 60);
+});
+
+await t('Wrapper notes send, Paradex stamp, fill time and first book; passes everything through', async () => {
+  const px = {
+    secret: 'x',
+    async bestPrices() { return { bid: '59880', ask: '59890' }; },
+    async placeOrder(o) { return { id: 'o1', created_at: 1000, echo: o.size }; },
+    async getOrder() { return { status: 'CLOSED', last_updated_at: 1300 }; },
+    async positions() { return []; },
+  };
+  const marks = {};
+  const w = timedClient(px, marks);
+  await w.bestPrices('BTC'); await w.bestPrices('BTC');
+  const r = await w.placeOrder({ size: '0.1' });
+  await w.getOrder('o1');
+  assert.equal(r.echo, '0.1'); assert.equal(w.secret, 'x');
+  assert.deepEqual(await w.positions(), []);
+  assert.equal(marks.stamped, 1000); assert.equal(marks.closed, 1300); assert.equal(marks.book.bid, '59880');
+  assert.ok(marks.sent > 0 && marks.ack >= marks.sent);
+});
+
+await t('Timing line walks TV -> Cloudflare -> engine -> order -> Paradex -> filled', () => {
+  const tv = Date.parse('2026-11-24T09:57:45Z');
+  const line = timingLine({ tvAt: tv, edgeAt: tv + 1400, edgeColo: 'MXP' }, { start: tv + 1425, sent: tv + 1635, stamped: tv + 1695, closed: tv + 2000, ack: tv + 1700 });
+  assert.equal(line, 'Timing: TV 09:57:45 -> Cloudflare (MXP) +1.4 s -> engine +25 ms -> order sent +210 ms -> Paradex stamped +60 ms -> filled +305 ms. Total 2.0 s.');
+});
+
+await t('Price line compares the Paradex book and fill with the TradingView price', () => {
+  const line = priceLine({ price: 60000 }, { book: { bid: '59940', ask: '59950' } }, [{ price: '59950' }]);
+  assert.equal(line, 'Prices: TradingView 60000 | Paradex 59940/59950 (mid -9.2 bp vs TradingView) | filled 59950 (-8.3 bp vs TradingView).');
+  assert.equal(priceLine({}, {}, []), '');
+});
+
+await t('Now line and Paradex ping', async () => {
+  assert.match(describeNow({ pd: { bid: 59882.2, ask: 59892 }, bn: { bid: 59925.6, ask: 59925.7, source: 'Binance perp' } }), /Paradex is -6\.4 bp/);
+  let n = 0;
+  const p = await pingParadex('https://x', { n: 3, fetchFn: async () => { n++; return json({ server_time: String(Date.now()) }); } });
+  assert.equal(p.n, 3); assert.equal(n, 3); assert.ok(Math.abs(p.clockOffset) < 50);
+});
+
+if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
