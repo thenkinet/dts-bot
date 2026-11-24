@@ -7,7 +7,7 @@
 //   POST /signal     Track A: a directional signal {id, side: long|short|flat, price?, size?} for the Engine
 //   GET  /engine     the Engine's state: last report, target, queue (header x-admin-token required)
 //   POST /telegram   Telegram webhook, allowed chat only:
-//                    /status, /check, /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
+//                    /status, /check, /spread (Binance vs Paradex, speed), /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
 //                    (allowed chat AND allowed sender ids)
 import { DurableObject } from 'cloudflare:workers';
 import { Paradex, BASES } from './paradex-client.js';
@@ -15,6 +15,7 @@ import { runCheck } from './check.js';
 import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
+import { takeSample, summarise, describeNow, describeSummary, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS } from './market-watch.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -95,6 +96,7 @@ export class Engine extends DurableObject {
       await st.setAlarm(Date.now());
       return Response.json({ queued: true, id: sig.id }, { status: 202 });
     }
+    if (url.pathname === '/market') return new Response(await this.marketReport(), { headers: { 'content-type': 'text/plain' } });
     if (url.pathname === '/state') {
       return Response.json({
         target: await st.get('target'), last: await st.get('last'), queue: (await st.get('queue')) || [],
@@ -173,7 +175,8 @@ export class Engine extends DurableObject {
       }
       // A resumed signal uses new client ids, so Paradex never sees the same client id twice.
       const run = sig.resumes ? { ...sig, id: `${sig.id}-r${sig.resumes}` } : sig;
-      const report = await executeSignal(this.px(), run, execConfig(env), {
+      const marks = { start: Date.now() };                     // timing of this signal (read-only)
+      const report = await executeSignal(timedClient(this.px(), marks), run, execConfig(env), {
         log: (m) => console.log(m),
         guard: () => this.guard(),                               // before EVERY order (D2, D3)
       });
@@ -181,19 +184,44 @@ export class Engine extends DurableObject {
       await st.put({ last: report, target: report.target, [`report:${Date.now()}`]: report });
       console.log(JSON.stringify({ event: 'engine.executed', report }));
       const fills = report.legs.flatMap((l) => l.fills.map((f) => `${l.side} ${f.size} @ ${f.price} (${f.method}, ${f.slippageBps} bp)`));
+      const prices = priceLine(sig, marks, report.legs.flatMap((l) => l.fills));
       const why = report.refused || report.stopped || report.legs.map((l) => l.stopped).filter(Boolean).join('; ');
       // Every position gets its disaster stop at Paradex right after execution.
       let stopLine;
       try { stopLine = describeStop(await syncDisasterStop(this.px(), env.MARKET, { bps: stopBps(env) })); }
       catch (e) { stopLine = `DISASTER STOP FAILED: ${String(e.message || e).slice(0, 200)}. Check the position now.`; }
       await telegram(env, `${report.ok ? 'Done' : 'INCOMPLETE'}: ${sig.id} ${sig.side}. Position ${report.before} -> ${report.after} (target ${report.target}).`
-        + (fills.length ? `\n${fills.join('\n')}` : '') + (report.ok ? '' : `\nGap ${report.gap ?? report.target}. ${why}`) + `\n${stopLine}`);
+        + (fills.length ? `\n${fills.join('\n')}` : '') + (report.ok ? '' : `\nGap ${report.gap ?? report.target}. ${why}`) + `\n${stopLine}`
+        + `\n${timingLine(sig, marks)}` + (prices ? `\n${prices}` : ''));
+      console.log(JSON.stringify({ event: 'engine.timing', id: sig.id, tvAt: sig.tvAt, edgeAt: sig.edgeAt, edgeColo: sig.edgeColo, receivedAt: sig.receivedAt, ...marks, tvPrice: sig.price }));
     } catch (e) {
       await st.put('last', { signalId: sig.id, error: String(e.message || e) });
       await telegram(env, `Signal ${sig.id} FAILED: ${String(e.message || e).slice(0, 300)}`);
     } finally {
       await st.delete('inflight');
     }
+  }
+
+  // /spread: where the engine runs, how fast Paradex answers from there, and Binance vs Paradex.
+  async marketReport() {
+    const env = this.env, st = this.ctx.storage, lines = [];
+    try {
+      const tr = await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text();
+      const g = (k) => (tr.match(new RegExp(`^${k}=(.*)$`, 'm')) || [])[1];
+      lines.push(`Engine runs in Cloudflare ${g('colo') || '?'} (${g('loc') || '?'}).`);
+    } catch { lines.push('Engine location unknown.'); }
+    const p = await pingParadex(BASES[env.PARADEX_ENV] || BASES.prod);
+    lines.push(p.n ? `Paradex round trip from there: ${Math.round(p.rttMedian)} ms typical, ${p.rttMin} ms best (${p.n} tries). Paradex clock ${p.clockOffset >= 0 ? '+' : ''}${Math.round(p.clockOffset)} ms vs ours.` : 'Paradex did not answer.');
+    lines.push(describeNow(await takeSample(this.px(), env.MARKET, { symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) })));
+    const all = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()];
+    lines.push(describeSummary('Last hour', summarise(all.filter((s) => s.t > Date.now() - 3_600_000))));
+    lines.push(describeSummary('Last 24 h', summarise(all)));
+    try {
+      const m = await this.px().market(env.MARKET);
+      lines.push(`Paradex ${env.MARKET}: tick ${m.price_tick_size} USD, size step ${m.order_size_increment}, minimum order ${m.min_notional} USD.`);
+    } catch { /* optional */ }
+    lines.push('1 bp = 0.01%. A negative gap means Paradex is cheaper than Binance. Binance quotes in USDT, Paradex in USD.');
+    return lines.join('\n');
   }
 
   // Checked before every order. Returns null to allow it, or the reason to stop.
@@ -258,6 +286,15 @@ export class Engine extends DurableObject {
       const msg = String(e.message || e).slice(0, 200);
       if ((await st.get('stopAlerted')) !== msg) { await st.put('stopAlerted', msg); await telegram(env, `RECONCILE: DISASTER STOP FAILED: ${msg}`); }
     }
+    // Every minute: one Binance vs Paradex sample for /spread, kept 24 hours. Never blocks the rest.
+    try {
+      const s = await takeSample(this.px(), env.MARKET, { symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) });
+      await st.put(`${SAMPLE_PREFIX}${String(s.t).padStart(15, '0')}`, s);
+      const stale = [...(await st.list({ prefix: SAMPLE_PREFIX, end: `${SAMPLE_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
+      for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
+    } catch (e) {
+      console.log(JSON.stringify({ event: 'engine.sample_failed', error: String(e.message || e) }));
+    }
     const old = [...(await st.list({ prefix: 'seen:' })).entries()].filter(([, at]) => Date.now() - at > SEEN_TTL_MS).map(([k]) => k);
     for (let i = 0; i < old.length; i += 128) await st.delete(old.slice(i, i + 128));
   }
@@ -297,6 +334,17 @@ async function webhookSecret(env) {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+const COMMANDS = [
+  { command: 'status', description: 'Position, limits, last signal' },
+  { command: 'check', description: 'Check: tiny order far from the price, cancelled' },
+  { command: 'spread', description: 'Binance vs Paradex prices, speed' },
+  { command: 'killall', description: 'Halt and cancel every order' },
+  { command: 'flatten', description: 'While halted: close positions' },
+  { command: 'resume', description: 'Lift the halt' },
+];
+const setCommands = (env) => fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commands: COMMANDS }),
+}).catch(() => {});
 const allowedUsers = (env) => String(env.TELEGRAM_USER_IDS || '').split(',').map((x) => x.trim()).filter(Boolean);
 const telegramLinked = (env) => Boolean(env.TELEGRAM_CHAT_ID) && allowedUsers(env).length > 0;
 
@@ -396,16 +444,7 @@ export default {
         body: JSON.stringify({ url: hook, secret_token: await webhookSecret(env), allowed_updates: ['message'], drop_pending_updates: true }),
       });
       const out = await r.json().catch(() => ({}));
-      await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setMyCommands`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ commands: [
-          { command: 'status', description: 'Position, limits, last signal' },
-          { command: 'check', description: 'Check: tiny order far from the price, cancelled' },
-          { command: 'killall', description: 'Halt and cancel every order' },
-          { command: 'flatten', description: 'While halted: close positions' },
-          { command: 'resume', description: 'Lift the halt' },
-        ] }),
-      }).catch(() => {});
+      await setCommands(env);
       return out.ok
         ? page('Telegram linked', `<p class="ok">Done. Now open your bot in Telegram and send <b>/start</b>.</p>`)
         : page('Not linked', `<p class="bad">Telegram refused: ${esc(out.description || r.status)}. Check the bot token in Cloudflare.</p>`);
@@ -446,6 +485,7 @@ export default {
     }
 
     if (url.pathname === '/signal' && request.method === 'POST') {
+      const edgeAt = Date.now();
       const body = await request.json().catch(() => null);
       if (!body || !safeEqual(body.secret, env.SIGNAL_SECRET)) return new Response('forbidden', { status: 403 });
       const age = Date.now() - toMs(body.ts);
@@ -453,7 +493,8 @@ export default {
       const id = String(body.id || '');
       if (!/^[A-Za-z0-9._:-]{1,48}$/.test(id)) return new Response('bad id: 1 to 48 of A-Z a-z 0-9 . _ : -', { status: 400 });
       if (!['long', 'short', 'flat'].includes(body.side)) return new Response('bad side: long, short or flat', { status: 400 });
-      const sig = { id, side: body.side, source: body.source };
+      // tvAt: when TradingView fired ({{timenow}}, to the second); edgeAt: when Cloudflare received it.
+      const sig = { id, side: body.side, source: body.source, tvAt: toMs(body.ts), edgeAt, edgeColo: request.cf?.colo };
       if (body.price !== undefined) { if (!(Number(body.price) > 0)) return new Response('bad price', { status: 400 }); sig.price = Number(body.price); }
       if (body.size !== undefined) {
         if (!(Number(body.size) > 0)) return new Response('bad size', { status: 400 });
@@ -486,13 +527,17 @@ export default {
       const cmd = first;
       try {
         if (cmd === '/start' || cmd === '/help') {
-          await telegram(env, 'Linked. Commands: /status, /check, /killall, /flatten, /resume.');
+          await setCommands(env);                                  // refreshes the menu after an update
+          await telegram(env, 'Linked. Commands: /status, /check, /spread, /killall, /flatten, /resume.');
         }
         if (cmd === '/check') {
           // A post-only bid 10% below the market cannot fill; it is cancelled at once.
           const lines = [];
           try { await runCheck(paradex(env), env.MARKET, (...a) => lines.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '))); } catch { /* failing step already logged */ }
           await telegram(env, `Check on Paradex ${env.PARADEX_ENV}:\n${lines.join('\n').slice(0, 3500)}`);
+        }
+        if (cmd === '/spread') {
+          await telegram(env, (await (await engine(env).fetch('https://engine/market')).text()).slice(0, 3500));
         }
         if (cmd === '/status') {
           const s = await controlCall(env, '');
