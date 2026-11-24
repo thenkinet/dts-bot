@@ -87,6 +87,9 @@ export class Engine extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const st = this.ctx.storage;
+    // Any contact starts the minute loop (reconcile, disaster stop, samples) if it is not running:
+    // a new engine starts it at its first /status or /spread, not only at its first signal.
+    if (!(await st.getAlarm())) await st.setAlarm(Date.now() + 1000);
     if (url.pathname === '/signal') {
       const sig = await request.json();
       if (await st.get(`seen:${sig.id}`)) return Response.json({ duplicate: true, id: sig.id });
@@ -107,6 +110,14 @@ export class Engine extends DurableObject {
   }
 
   async alarm() {
+    // A retired engine (ENGINE_REGION changed) stops its minute loop and forgets its state, so two
+    // engines never manage the same account. Its disaster stops are left to the new engine.
+    if (this.ctx.id.toString() !== engineId(this.env).toString()) {
+      console.log(JSON.stringify({ event: 'engine.retired', id: this.ctx.id.toString() }));
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      return;
+    }
     try {
       await this.step();
     } catch (e) {
@@ -299,7 +310,12 @@ export class Engine extends DurableObject {
     for (let i = 0; i < old.length; i += 128) await st.delete(old.slice(i, i + 128));
   }
 }
-const engine = (env) => env.ENGINE.get(env.ENGINE.idFromName(env.MARKET || 'BTC-USD-PERP'));
+// The engine lives where ENGINE_REGION says (a Cloudflare location hint, e.g. "apac" for Asia,
+// close to Paradex). A Durable Object never moves: a new region means a new engine, created empty,
+// and the old one retires itself at its next alarm (see Engine.alarm). Change it only when flat.
+const engineName = (env) => `${env.MARKET || 'BTC-USD-PERP'}${env.ENGINE_REGION ? `@${env.ENGINE_REGION}` : ''}`;
+const engineId = (env) => env.ENGINE.idFromName(engineName(env));
+const engine = (env) => env.ENGINE.get(engineId(env), env.ENGINE_REGION ? { locationHint: env.ENGINE_REGION } : undefined);
 
 const control = (env) => env.CONTROL.get(env.CONTROL.idFromName('account'));
 const controlCall = async (env, path) => (await control(env).fetch(`https://control${path}`)).json();
