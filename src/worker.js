@@ -209,7 +209,7 @@ export class Engine extends DurableObject {
   // On a breach: persistent HALT and one Telegram alert.
   async dailyLoss() {
     const st = this.ctx.storage, env = this.env;
-    const value = Number((await this.px().account()).account_value);
+    const value = Number((await this.px().accountInfo()).account_value);
     if (!Number.isFinite(value)) throw new Error('no account_value in /account');
     const date = new Date().toISOString().slice(0, 10);
     let day = await st.get('day');
