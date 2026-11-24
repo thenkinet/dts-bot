@@ -8,6 +8,7 @@ workers_dev = true
 PARADEX_ENV = "prod"             # real Paradex (the testnet could not fund new accounts in Nov 2026); tiny limits below
 MARKET = "BTC-USD-PERP"
 PARADEX_INTERACTIVE = "true"     # Retail token: zero fees, RPI liquidity (Track A, taker method)
+ENGINE_REGION = "apac"           # run the engine in Asia-Pacific, near Paradex. Change only when flat.
 
 # Telegram: TELEGRAM_CHAT_ID and TELEGRAM_USER_IDS (comma-separated) are set as Cloudflare
 # secrets, from the numbers /start gives you. They are never written here, so this public
