@@ -80,5 +80,12 @@ await t('Linked: /start from the owner answers in the allowed chat', async () =>
   assert.match(m.body.text, /Linked/);
 });
 
+await t('/tick refuses a wrong secret, a bad price and a stale time; never reaches the engine then', async () => {
+  const post = (b) => worker.fetch(req('/tick', { method: 'POST', body: JSON.stringify(b) }), base);
+  assert.equal((await post({ secret: 'nope', ts: new Date().toISOString(), price: 1 })).status, 403);
+  assert.equal((await post({ secret: base.SIGNAL_SECRET, ts: new Date().toISOString(), price: 0 })).status, 400);
+  assert.equal((await post({ secret: base.SIGNAL_SECRET, ts: '2020-01-01T00:00:00Z', price: 1 })).status, 400);
+});
+
 console.log(fails ? `\n${fails} worker check(s) FAILED` : '\nAll worker checks passed');
 process.exit(fails ? 1 : 0);

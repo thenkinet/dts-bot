@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -85,6 +85,26 @@ await t('Now line and Paradex ping', async () => {
   let n = 0;
   const p = await pingParadex('https://x', { n: 3, fetchFn: async () => { n++; return json({ server_time: String(Date.now()) }); } });
   assert.equal(p.n, 3); assert.equal(n, 3); assert.ok(Math.abs(p.clockOffset) < 50);
+});
+
+await t('Tick delays: bar close -> TradingView -> Cloudflare -> engine', () => {
+  const barOpen = Date.parse('2026-11-24T12:00:00Z');
+  const d = tickDelays({ barOpen, interval: '1', tvAt: barOpen + 61_000, edgeAt: barOpen + 61_700, engineAt: barOpen + 61_850 });
+  assert.equal(d.closeAt, barOpen + 60_000);
+  assert.equal(d.binanceToTv, 1000); assert.equal(d.tvToCloudflare, 700); assert.equal(d.cloudflareToEngine, 150);
+  assert.equal(tickDelays({ barOpen: NaN, interval: '1', tvAt: 5, edgeAt: 10, engineAt: 12 }).binanceToTv, null);
+});
+
+await t('Tick summary: gap vs Binance close, typical and slowest delays', () => {
+  const ticks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => ({ t: i, price: 100, pd: { bid: 99.9, ask: 99.92, ms: 40 },
+    delays: { binanceToTv: i * 100, tvToCloudflare: 500, cloudflareToEngine: 150 } }));
+  const m = summariseTicks(ticks);
+  assert.equal(m.n, 10); assert.ok(Math.abs(m.gapMean + 9) < 0.01);
+  assert.equal(m.binanceToTv.med, 550); assert.equal(m.binanceToTv.p90, 1000);
+  const txt = describeTicks('Last hour', m);
+  assert.match(txt, /Gap: Paradex -9\.0 bp vs Binance/);
+  assert.match(txt, /Binance bar close -> TradingView fires: 550 ms typical, 1\.0 s slowest 10%/);
+  assert.match(describeTicks('Last hour', summariseTicks([])), /no TradingView ticks yet/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');

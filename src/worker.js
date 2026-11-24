@@ -4,6 +4,7 @@
 //   GET  /setup      one-time page: links Telegram to this bot (asks for the admin token)
 //   GET  /check      the Paradex check: tiny orders far from the price, cancelled (header x-admin-token required)
 //   POST /alert      relays a TradingView/MMT test alert to Telegram (secret + fresh ts in the body)
+//   POST /tick       a TradingView 1-minute bar-close alert: Binance close + delays, for /spread. Never trades.
 //   POST /signal     Track A: a directional signal {id, side: long|short|flat, price?, size?} for the Engine
 //   GET  /engine     the Engine's state: last report, target, queue (header x-admin-token required)
 //   POST /telegram   Telegram webhook, allowed chat only:
@@ -15,7 +16,8 @@ import { runCheck } from './check.js';
 import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
-import { takeSample, summarise, describeNow, describeSummary, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS } from './market-watch.js';
+import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
+  TICK_PREFIX, tickDelays, summariseTicks, describeTicks } from './market-watch.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -98,6 +100,16 @@ export class Engine extends DurableObject {
       await st.put({ [`seen:${sig.id}`]: Date.now(), queue });   // one atomic write
       await st.setAlarm(Date.now());
       return Response.json({ queued: true, id: sig.id }, { status: 202 });
+    }
+    if (url.pathname === '/tick') {
+      const k = await request.json();
+      const engineAt = Date.now();
+      const pd = await takeSample(this.px(), this.env.MARKET, { binance: false }).then((x) => x.pd).catch(() => null);
+      const rec = { t: k.edgeAt, price: k.price, pd, delays: tickDelays({ ...k, engineAt }) };
+      await st.put(`${TICK_PREFIX}${String(k.edgeAt).padStart(15, '0')}`, rec);
+      const stale = [...(await st.list({ prefix: TICK_PREFIX, end: `${TICK_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
+      for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
+      return Response.json({ recorded: true });
     }
     if (url.pathname === '/market') return new Response(await this.marketReport(), { headers: { 'content-type': 'text/plain' } });
     if (url.pathname === '/state') {
@@ -223,10 +235,16 @@ export class Engine extends DurableObject {
     } catch { lines.push('Engine location unknown.'); }
     const p = await pingParadex(BASES[env.PARADEX_ENV] || BASES.prod);
     lines.push(p.n ? `Paradex round trip from there: ${Math.round(p.rttMedian)} ms typical, ${p.rttMin} ms best (${p.n} tries). Paradex clock ${p.clockOffset >= 0 ? '+' : ''}${Math.round(p.clockOffset)} ms vs ours.` : 'Paradex did not answer.');
-    lines.push(describeNow(await takeSample(this.px(), env.MARKET, { symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) })));
-    const all = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()];
-    lines.push(describeSummary('Last hour', summarise(all.filter((s) => s.t > Date.now() - 3_600_000))));
-    lines.push(describeSummary('Last 24 h', summarise(all)));
+    const now = await takeSample(this.px(), env.MARKET, { binance: env.BINANCE_DIRECT === 'true', symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) });
+    if (now.pd) lines.push(`Paradex now: ${now.pd.bid}/${now.pd.ask} (spread ${(now.pd.ask - now.pd.bid).toFixed(1)} USD).`);
+    if (now.bn) lines.push(describeNow(now));
+    const ticks = [...(await st.list({ prefix: TICK_PREFIX })).values()];
+    const last = ticks.at(-1);
+    if (last) lines.push(`Last TradingView tick ${Math.round((Date.now() - last.t) / 1000)} s ago: Binance close ${last.price}.`);
+    lines.push(describeTicks('Last hour', summariseTicks(ticks.filter((k) => k.t > Date.now() - 3_600_000))));
+    lines.push(describeTicks('Last 24 h', summariseTicks(ticks)));
+    const own = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()].filter((x) => x.pd);
+    if (own.length) lines.push(`Engine's own minute checks (${own.length}): Paradex answers in ${Math.round(summarise(own).pdMs)} ms typical.`);
     try {
       const m = await this.px().market(env.MARKET);
       lines.push(`Paradex ${env.MARKET}: tick ${m.price_tick_size} USD, size step ${m.order_size_increment}, minimum order ${m.min_notional} USD.`);
@@ -297,9 +315,9 @@ export class Engine extends DurableObject {
       const msg = String(e.message || e).slice(0, 200);
       if ((await st.get('stopAlerted')) !== msg) { await st.put('stopAlerted', msg); await telegram(env, `RECONCILE: DISASTER STOP FAILED: ${msg}`); }
     }
-    // Every minute: one Binance vs Paradex sample for /spread, kept 24 hours. Never blocks the rest.
+    // Every minute: one Paradex sample for /spread (book, response time), kept 24 hours. Never blocks the rest.
     try {
-      const s = await takeSample(this.px(), env.MARKET, { symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) });
+      const s = await takeSample(this.px(), env.MARKET, { binance: env.BINANCE_DIRECT === 'true', symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) });
       await st.put(`${SAMPLE_PREFIX}${String(s.t).padStart(15, '0')}`, s);
       const stale = [...(await st.list({ prefix: SAMPLE_PREFIX, end: `${SAMPLE_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
@@ -498,6 +516,19 @@ export default {
       const { secret, ...rest } = body;
       await telegram(env, `Alert received: ${JSON.stringify(rest)}`);
       return Response.json({ relayed: true });
+    }
+
+    // TradingView 1-minute bar-close alert on the Binance chart: measures delays and the price gap.
+    // Same secret as signals, but this route can never trade.
+    if (url.pathname === '/tick' && request.method === 'POST') {
+      const edgeAt = Date.now();
+      const body = await request.json().catch(() => null);
+      if (!body || !safeEqual(body.secret, env.SIGNAL_SECRET)) return new Response('forbidden', { status: 403 });
+      const tvAt = toMs(body.ts), barOpen = toMs(body.bar);
+      if (!(Math.abs(edgeAt - tvAt) <= 5 * 60_000)) return new Response('stale or missing ts', { status: 400 });
+      if (!(Number(body.price) > 0)) return new Response('bad price', { status: 400 });
+      return engine(env).fetch('https://engine/tick', { method: 'POST', body: JSON.stringify({
+        tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo }) });
     }
 
     if (url.pathname === '/signal' && request.method === 'POST') {
