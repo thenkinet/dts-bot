@@ -8,7 +8,8 @@
 // official public-data host is used instead, and every line says which one it is.
 // Read-only: nothing here places, changes or cancels an order.
 
-export const SAMPLE_PREFIX = 'mw:';
+export const SAMPLE_PREFIX = 'mw:';   // every minute from the engine: Paradex book and response time
+export const TICK_PREFIX = 'tk:';     // every minute from TradingView (/tick): Binance close and the delays
 export const KEEP_MS = 24 * 3_600_000;
 
 const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -57,14 +58,57 @@ export async function binanceBook(symbol, fetchFn = fetch) {
 export const binanceError = () => lastBinanceError;
 export const _resetBinance = () => { perpRefused = false; lastBinanceError = null; };
 
-// One sample: Paradex book (the view the bot trades on) and Binance book, with response times.
-export async function takeSample(px, market, { symbol, fetchFn = fetch, now = Date.now } = {}) {
+// One sample: Paradex book (the view the bot trades on) and, if asked, Binance's, with response times.
+// Binance refuses Cloudflare's servers (HTTP 403), so the minute loop asks Paradex only and the
+// Binance price comes from TradingView through /tick.
+export async function takeSample(px, market, { symbol, binance = true, fetchFn = fetch, now = Date.now } = {}) {
   const t0 = now();
   const [pd, bn] = await Promise.all([
     px.bestPrices(market).then((b) => ({ bid: Number(b.bid), ask: Number(b.ask), ms: now() - t0 })).catch(() => null),
-    binanceBook(symbol || binanceSymbol(market), fetchFn),
+    binance ? binanceBook(symbol || binanceSymbol(market), fetchFn) : null,
   ]);
   return { t: t0, pd, bn };
+}
+
+// A TradingView bar-close alert: {{time}} is the bar's open, {{interval}} its length in minutes
+// ("1"), {{timenow}} when TradingView fired (to the second). Returns the delays in ms.
+export function tickDelays({ barOpen, interval, tvAt, edgeAt, engineAt }) {
+  const mins = Number(interval);
+  const closeAt = Number.isFinite(barOpen) && mins > 0 ? barOpen + mins * 60_000 : null;
+  return {
+    closeAt,
+    binanceToTv: closeAt && Number.isFinite(tvAt) ? tvAt - closeAt : null,
+    tvToCloudflare: Number.isFinite(tvAt) ? edgeAt - tvAt : null,
+    cloudflareToEngine: engineAt - edgeAt,
+  };
+}
+
+const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
+
+// Summary of /tick samples: gap Paradex mid vs Binance close, and each delay (median and slowest 10%).
+export function summariseTicks(ticks) {
+  const ok = ticks.filter((k) => k.price > 0 && k.pd && mid(k.pd.bid, k.pd.ask));
+  const gaps = ok.map((k) => bps(mid(k.pd.bid, k.pd.ask), k.price));
+  const d = (key) => ticks.map((k) => k.delays?.[key]).filter((x) => Number.isFinite(x));
+  const both = (key) => ({ med: median(d(key)), p90: pct(d(key), 0.9) });
+  return {
+    n: ticks.length, nGap: ok.length,
+    gapMean: mean(gaps), gapMin: gaps.length ? Math.min(...gaps) : null, gapMax: gaps.length ? Math.max(...gaps) : null,
+    pdSpread: mean(ok.map((k) => ((k.pd.ask - k.pd.bid) / mid(k.pd.bid, k.pd.ask)) * 10_000)),
+    binanceToTv: both('binanceToTv'), tvToCloudflare: both('tvToCloudflare'), cloudflareToEngine: both('cloudflareToEngine'),
+    pdMs: median(ok.map((k) => k.pd.ms).filter((x) => Number.isFinite(x))),
+  };
+}
+
+export function describeTicks(label, m) {
+  if (!m.n) return `${label}: no TradingView ticks yet (set up the 1-minute alert to /tick).`;
+  const dl = (x) => `${secs(x.med)} typical, ${secs(x.p90)} slowest 10%`;
+  return `${label} (${m.n} TradingView ticks):`
+    + (m.nGap ? `\n- Gap: Paradex ${f1(m.gapMean)} bp vs Binance on average (from ${f1(m.gapMin)} to ${f1(m.gapMax)}). Paradex spread ${m.pdSpread.toFixed(2)} bp.` : '')
+    + `\n- Binance bar close -> TradingView fires: ${dl(m.binanceToTv)} (TradingView time is to the second).`
+    + `\n- TradingView -> Cloudflare: ${dl(m.tvToCloudflare)}.`
+    + `\n- Cloudflare -> engine in Asia: ${dl(m.cloudflareToEngine)}.`
+    + (m.pdMs != null ? `\n- Paradex answers the engine in ${secs(m.pdMs)} typical.` : '');
 }
 
 // Summary of samples: gap = Paradex mid vs Binance mid, in basis points (1 bp = 0.01%).
