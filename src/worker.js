@@ -1,6 +1,6 @@
 // DTS bot Worker. Routes:
 //   GET  /health     liveness, plus which secrets are set (names only, never values)
-//   GET  /probe      can Cloudflare reach Paradex? No key needed (answers review point F5)
+//   GET  /probe      can Cloudflare reach Paradex and Binance, near the caller and from the engine? No key needed
 //   GET  /setup      one-time page: links Telegram to this bot (asks for the admin token)
 //   GET  /check      the Paradex check: tiny orders far from the price, cancelled (header x-admin-token required)
 //   POST /alert      relays a TradingView/MMT test alert to Telegram (secret + fresh ts in the body)
@@ -111,6 +111,7 @@ export class Engine extends DurableObject {
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
       return Response.json({ recorded: true });
     }
+    if (url.pathname === '/probe') return Response.json(await probeFromHere());
     if (url.pathname === '/market') return new Response(await this.marketReport(), { headers: { 'content-type': 'text/plain' } });
     if (url.pathname === '/state') {
       return Response.json({
@@ -446,6 +447,28 @@ async function flatten(env) {
   return { orders: sent, positionsLeft: left };
 }
 
+// Public, read-only reachability test: where this code runs, and whether Paradex and Binance answer
+// from there (status and time only; no key is used). /probe runs it near the caller and in the engine.
+const PROBE_URLS = {
+  'Paradex /system/time': `${BASES.prod}/system/time`,
+  'Binance perp': 'https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol=BTCUSDT',
+  'Binance spot (data-api)': 'https://data-api.binance.vision/api/v3/ticker/bookTicker?symbol=BTCUSDT',
+  'Binance spot (api)': 'https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT',
+};
+async function probeFromHere() {
+  const out = {};
+  try {
+    const tr = await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text();
+    out.location = tr.split('\n').filter((l) => /^(colo|loc)=/.test(l)).join(' ');
+  } catch (e) { out.location = String(e.message || e); }
+  for (const [name, u] of Object.entries(PROBE_URLS)) {
+    const t0 = Date.now();
+    try { const r = await fetch(u); await r.arrayBuffer(); out[name] = { status: r.status, ms: Date.now() - t0 }; }
+    catch (e) { out[name] = { error: String(e.message || e).slice(0, 120) }; }
+  }
+  return out;
+}
+
 // ---------- routes ----------
 export default {
   async fetch(request, env) {
@@ -485,17 +508,9 @@ export default {
     }
 
     if (url.pathname === '/probe') {
-      const out = {};
-      try { out.egress = (await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text()).split('\n').filter((l) => /^(ip|colo|loc)=/.test(l)); } catch (e) { out.egress = String(e); }
-      for (const [name, base] of Object.entries(BASES)) {
-        for (const path of ['/system/config', '/bbo/BTC-USD-PERP']) {
-          try {
-            const t0 = Date.now();
-            const r = await fetch(base + path);
-            out[`${name} ${path}`] = { status: r.status, ms: Date.now() - t0 };
-          } catch (e) { out[`${name} ${path}`] = { error: String(e) }; }
-        }
-      }
+      // From the Cloudflare location nearest the caller, then from the engine (Seoul, near Paradex).
+      const out = { here: await probeFromHere() };
+      try { out.engine = await (await engine(env).fetch('https://engine/probe')).json(); } catch (e) { out.engine = { error: String(e.message || e) }; }
       return Response.json(out);
     }
 
