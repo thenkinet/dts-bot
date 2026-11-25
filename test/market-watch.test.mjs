@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -119,6 +119,33 @@ await t('Mark gaps and the liquidity summary', () => {
 await t('Price line with the execution report: Paradex mid and mark lead, TradingView for information', () => {
   const line = priceLine({ price: 60050 }, {}, [{ price: '59950' }], { ref: '59945', bidAtStart: '59940', askAtStart: '59950', markAtStart: '59942', markGapBps: 0.5 });
   assert.equal(line, 'Prices: Paradex 59940/59950, mid 59945.0 (mark 59942.0, +0.5 bp) | filled 59950 (+0.8 bp vs mid) | TradingView (Binance USDT) 60050, -17.5 bp.');
+});
+
+await t('Short report: verdict, signed bp vs mark, p50 / p99 / max, guard, status', () => {
+  // 100 minutes: mid vs mark from -1 to +3 bp, one bad minute at -40 bp below the mark.
+  const samples = Array.from({ length: 100 }, (_, i) => {
+    const gap = i === 50 ? -40 : (i % 5) - 1;                 // bp
+    const mark = 60000, m = mark * (1 + gap / 10_000);
+    return { t: i, mark, pd: { bid: m - 5, ask: m + 5, ms: 40 + (i % 10) } };
+  });
+  const now = { mark: 60000, pd: { bid: 60013, ask: 60023, ms: 41 } };   // mid 60018 = +3.0 bp
+  const txt = shortReport({ now, samples, guard: 50, label: 'Last 24 h', status: 'Position flat · bot paused', at: Date.parse('2026-11-25T11:42:00Z') });
+  const lines = txt.split('\n');
+  assert.equal(lines[0], '✅ Paradex OK to trade · 11:42 UTC');
+  assert.equal(lines[1], 'Now: 60,018.0 · +3.0 bp vs mark · spread 1.7 bp');
+  assert.match(txt, /Price vs mark\s+\+1\.0\s+\+3\.0\s+-40\.0/);    // the worst minute keeps its minus sign
+  assert.match(txt, /Spread\s+1\.7\s+1\.7\s+1\.7/);
+  assert.match(txt, /Speed \(ms\)\s+44\s+49\s+49/);
+  assert.match(txt, /Guard \(50 bp\): never reached in 100 minutes/);
+  assert.equal(lines.at(-1), 'Position flat · bot paused');
+});
+
+await t('Verdict: OK, thin past half the guard, blocked past the guard or without a mark', () => {
+  assert.equal(verdict(3, 50).icon, '✅');
+  assert.equal(verdict(-30, 50).icon, '⚠️');
+  assert.equal(verdict(51, 50).icon, '⛔');
+  assert.equal(verdict(null, 50).icon, '⛔');
+  assert.match(shortReport({ now: { pd: { bid: 1, ask: 2 } }, samples: [], guard: 50, label: 'Last 24 h' }), /mark price unavailable[\s\S]*Last 24 h: no samples yet/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
