@@ -17,7 +17,9 @@ ENGINE_REGION = "apac"           # run the engine in Asia-Pacific, near Paradex.
 # Track A executor
 EXEC_MODE = "taker"              # "taker" first; "maker" = post-only at the touch + IOC fallback
 ORDER_SIZE = "0.0002"            # position size per signal (~$12; Paradex minimum order is $10)
-MAX_SLIPPAGE_BPS = "20"
+MAX_SLIPPAGE_BPS = "20"          # at most 0.2% worse than the Paradex mid when the signal starts
+PRICE_REFERENCE = "venue"        # the limit is set around the Paradex mid; the TradingView (Binance USDT) price is for the report only
+MAX_MARK_GAP_BPS = "50"          # refuse to trade, and alert, when the Paradex mid is more than 0.5% from the mark price
 TAKER_ATTEMPTS = "3"
 MAKER_WINDOW_MS = "60000"
 MAKER_REPOSTS = "4"
