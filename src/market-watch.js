@@ -10,7 +10,7 @@
 
 export const SAMPLE_PREFIX = 'mw:';   // every minute from the engine: Paradex book and response time
 export const TICK_PREFIX = 'tk:';     // every minute from TradingView (/tick): Binance close and the delays
-export const KEEP_MS = 24 * 3_600_000;
+export const KEEP_MS = 7 * 24 * 3_600_000;   // 7 days of minute samples (about 10,000, a few MB)
 
 const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
@@ -221,6 +221,51 @@ export function describeMark(label, samples, limit) {
     + (absLast.length ? `; last trade vs mark ${median(absLast).toFixed(1)} bp typical, ${Math.max(...absLast).toFixed(1)} bp worst` : '')
     + `; spread ${median(sp).toFixed(1)} bp typical, ${pct(sp, 0.95).toFixed(1)} bp at the widest 5%. `
     + (over ? `${over} minute(s) beyond the ${limit} bp guard.` : `Never beyond the ${limit} bp guard.`);
+}
+
+// ---- the short /spread report ----
+// Signed values keep their direction: + means above the mark price, - below.
+// p50: half the minutes were closer than this. p99: only 1% further. max: the single worst minute.
+// For the signed gap, p50 is the plain median; p99 and max are taken by size, with the sign of that minute.
+// Nearest-rank percentile: the value that p of the minutes are at or below (p99 of 100 minutes = the 99th).
+const rank = (n, p) => Math.min(n - 1, Math.max(0, Math.ceil(p * n) - 1));
+const bySize = (vals, p) => (vals.length ? [...vals].sort((a, b) => Math.abs(a) - Math.abs(b))[rank(vals.length, p)] : null);
+const pctR = (vals, p) => (vals.length ? [...vals].sort((a, b) => a - b)[rank(vals.length, p)] : null);
+const sb = (x) => (x == null || !Number.isFinite(x) ? '-' : (x > 0 ? '+' : x < 0 ? '' : '') + x.toFixed(1));  // signed bp
+const ub = (x) => (x == null || !Number.isFinite(x) ? '-' : x.toFixed(1));                                     // unsigned bp
+const num = (x) => Number(x).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const row = (label, a, b, c) => `${label.padEnd(17)}${String(a).padStart(7)}${String(b).padStart(7)}${String(c).padStart(7)}`;
+
+export function verdict(gapBps, guard) {
+  if (gapBps == null || !Number.isFinite(gapBps)) return { icon: '⛔', text: 'Paradex mark price unavailable: signals refused' };
+  if (Math.abs(gapBps) > guard) return { icon: '⛔', text: 'Paradex blocked: book too far from the mark' };
+  if (Math.abs(gapBps) > guard / 2) return { icon: '⚠️', text: 'Paradex thin: book drifting from the mark' };
+  return { icon: '✅', text: 'Paradex OK to trade' };
+}
+
+// samples: the engine's minute samples ({ t, pd: {bid, ask, ms}, mark }). now: the same shape, taken now.
+export function shortReport({ now, samples, guard, label, status, at = Date.now() }) {
+  const gNow = markGaps(now);
+  const v = verdict(gNow.mid, guard);
+  const pm = now?.pd ? mid(now.pd.bid, now.pd.ask) : null;
+  const g = samples.map((s) => ({ ...markGaps(s), ms: s.pd?.ms })).filter((x) => x.mid != null);
+  const gaps = g.map((x) => x.mid), spreads = g.map((x) => x.spread), ms = g.map((x) => x.ms).filter((x) => Number.isFinite(x));
+  const over = gaps.filter((x) => Math.abs(x) > guard).length;
+  const lines = [`${v.icon} ${v.text} · ${new Date(at).toISOString().slice(11, 16)} UTC`];
+  lines.push(pm ? `Now: ${num(pm)} · ${sb(gNow.mid)} bp vs mark · spread ${ub(gNow.spread)} bp` : 'Now: no Paradex price');
+  lines.push('');
+  if (g.length) {
+    lines.push(row(`${label} (bp)`, 'p50', 'p99', 'max'));
+    lines.push(row('Price vs mark', sb(pctR(gaps, 0.5)), sb(bySize(gaps, 0.99)), sb(bySize(gaps, 1))));
+    lines.push(row('Spread', ub(pctR(spreads, 0.5)), ub(pctR(spreads, 0.99)), ub(Math.max(...spreads))));
+    if (ms.length) lines.push(row('Speed (ms)', Math.round(pctR(ms, 0.5)), Math.round(pctR(ms, 0.99)), Math.round(Math.max(...ms))));
+    lines.push('');
+    lines.push(`Guard (${guard} bp): ${over ? `reached in ${over} of ${g.length} minutes` : `never reached in ${g.length} minutes`}`);
+  } else {
+    lines.push(`${label}: no samples yet`);
+  }
+  if (status) lines.push(status);
+  return lines.join('\n');
 }
 
 // Binance price that TradingView sent vs the Paradex book when the engine looked, and the fill.
