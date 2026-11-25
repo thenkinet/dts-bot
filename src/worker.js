@@ -1,6 +1,6 @@
 // DTS bot Worker. Routes:
 //   GET  /health     liveness, plus which secrets are set (names only, never values)
-//   GET  /probe      can Cloudflare reach Paradex? No key needed (answers review point F5)
+//   GET  /probe      can Cloudflare reach Paradex and Binance, near the caller and from the engine? No key needed
 //   GET  /setup      one-time page: links Telegram to this bot (asks for the admin token)
 //   GET  /check      the Paradex check: tiny orders far from the price, cancelled (header x-admin-token required)
 //   POST /alert      relays a TradingView/MMT test alert to Telegram (secret + fresh ts in the body)
@@ -17,7 +17,7 @@ import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
-  TICK_PREFIX, tickDelays, summariseTicks, describeTicks } from './market-watch.js';
+  TICK_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark } from './market-watch.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -59,6 +59,8 @@ const execConfig = (env) => ({
   size: env.ORDER_SIZE || DEFAULTS.size,
   maxPosition: env.MAX_POSITION,
   maxSlippageBps: Number(env.MAX_SLIPPAGE_BPS || DEFAULTS.maxSlippageBps),
+  reference: env.PRICE_REFERENCE || 'venue',                  // the cap is set around the Paradex mid
+  maxMarkGapBps: Number(env.MAX_MARK_GAP_BPS || 50),          // mid more than 0.5% from mark: don't trade
   takerAttempts: Number(env.TAKER_ATTEMPTS || DEFAULTS.takerAttempts),
   makerWindowMs: Number(env.MAKER_WINDOW_MS || DEFAULTS.makerWindowMs),
   makerReposts: Number(env.MAKER_REPOSTS || DEFAULTS.makerReposts),
@@ -111,6 +113,7 @@ export class Engine extends DurableObject {
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
       return Response.json({ recorded: true });
     }
+    if (url.pathname === '/probe') return Response.json(await probeFromHere());
     if (url.pathname === '/market') return new Response(await this.marketReport(), { headers: { 'content-type': 'text/plain' } });
     if (url.pathname === '/state') {
       return Response.json({
@@ -207,7 +210,7 @@ export class Engine extends DurableObject {
       await st.put({ last: report, target: report.target, [`report:${Date.now()}`]: report });
       console.log(JSON.stringify({ event: 'engine.executed', report }));
       const fills = report.legs.flatMap((l) => l.fills.map((f) => `${l.side} ${f.size} @ ${f.price} (${f.method}, ${f.slippageBps} bp)`));
-      const prices = priceLine(sig, marks, report.legs.flatMap((l) => l.fills));
+      const prices = priceLine(sig, marks, report.legs.flatMap((l) => l.fills), report);
       const why = report.refused || report.stopped || report.legs.map((l) => l.stopped).filter(Boolean).join('; ');
       // Every position gets its disaster stop at Paradex right after execution.
       let stopLine;
@@ -237,6 +240,16 @@ export class Engine extends DurableObject {
     lines.push(p.n ? `Paradex round trip from there: ${Math.round(p.rttMedian)} ms typical, ${p.rttMin} ms best (${p.n} tries). Paradex clock ${p.clockOffset >= 0 ? '+' : ''}${Math.round(p.clockOffset)} ms vs ours.` : 'Paradex did not answer.');
     const now = await takeSample(this.px(), env.MARKET, { binance: env.BINANCE_DIRECT === 'true', symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) });
     if (now.pd) lines.push(`Paradex now: ${now.pd.bid}/${now.pd.ask} (spread ${(now.pd.ask - now.pd.bid).toFixed(1)} USD).`);
+    try {
+      const m = await this.px().marketSummary(env.MARKET);
+      const g = markGaps({ ...now, mark: m.mark_price, last: m.last_traded_price, index: m.underlying_price });
+      lines.push(`Mark ${Number(m.mark_price).toFixed(1)}, last trade ${m.last_traded_price}, index (oracle) ${Number(m.underlying_price).toFixed(1)}.`
+        + (g.mid != null ? ` Mid ${g.mid >= 0 ? '+' : ''}${g.mid.toFixed(1)} bp vs mark (guard ${Number(env.MAX_MARK_GAP_BPS || 50)} bp).` : ''));
+    } catch { lines.push('Mark price unavailable: signals would be refused.'); }
+    const ownAll = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()];
+    const limitBps = Number(env.MAX_MARK_GAP_BPS || 50);
+    lines.push(describeMark('Liquidity, last hour', ownAll.filter((x) => x.t > Date.now() - 3_600_000), limitBps));
+    lines.push(describeMark('Liquidity, last 24 h', ownAll, limitBps));
     if (now.bn) lines.push(describeNow(now));
     const ticks = [...(await st.list({ prefix: TICK_PREFIX })).values()];
     const last = ticks.at(-1);
@@ -251,6 +264,24 @@ export class Engine extends DurableObject {
     } catch { /* optional */ }
     lines.push('1 bp = 0.01%. A negative gap means Paradex is cheaper than Binance. Binance quotes in USDT, Paradex in USD.');
     return lines.join('\n');
+  }
+
+  // Liquidity watch, every minute: Paradex mid vs mark. One Telegram alert when the gap passes
+  // MAX_MARK_GAP_BPS (signals would be refused), one when it is back.
+  async markWatch(s) {
+    const st = this.ctx.storage, env = this.env;
+    const g = markGaps(s);
+    if (g.mid == null) return;
+    const limit = Number(env.MAX_MARK_GAP_BPS || 50);
+    const wide = Math.abs(g.mid) > limit;
+    const was = await st.get('markAlerted');
+    if (wide && !was) {
+      await st.put('markAlerted', Date.now());
+      await telegram(env, `LIQUIDITY: Paradex mid is ${g.mid.toFixed(1)} bp from the mark price (limit ${limit}). Signals are refused until it narrows. Spread ${g.spread.toFixed(1)} bp, last trade ${g.last == null ? '?' : g.last.toFixed(1)} bp from mark.`);
+    } else if (!wide && was) {
+      await st.delete('markAlerted');
+      await telegram(env, `LIQUIDITY: back to normal, Paradex mid ${g.mid.toFixed(1)} bp from the mark price.`);
+    }
   }
 
   // Checked before every order. Returns null to allow it, or the reason to stop.
@@ -318,6 +349,11 @@ export class Engine extends DurableObject {
     // Every minute: one Paradex sample for /spread (book, response time), kept 24 hours. Never blocks the rest.
     try {
       const s = await takeSample(this.px(), env.MARKET, { binance: env.BINANCE_DIRECT === 'true', symbol: binanceSymbol(env.MARKET, env.BINANCE_SYMBOL) });
+      try {
+        const m = await this.px().marketSummary(env.MARKET);
+        s.mark = Number(m.mark_price); s.last = Number(m.last_traded_price); s.index = Number(m.underlying_price);
+      } catch { /* the sample is kept without them */ }
+      await this.markWatch(s);
       await st.put(`${SAMPLE_PREFIX}${String(s.t).padStart(15, '0')}`, s);
       const stale = [...(await st.list({ prefix: SAMPLE_PREFIX, end: `${SAMPLE_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
@@ -446,6 +482,28 @@ async function flatten(env) {
   return { orders: sent, positionsLeft: left };
 }
 
+// Public, read-only reachability test: where this code runs, and whether Paradex and Binance answer
+// from there (status and time only; no key is used). /probe runs it near the caller and in the engine.
+const PROBE_URLS = {
+  'Paradex /system/time': `${BASES.prod}/system/time`,
+  'Binance perp': 'https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol=BTCUSDT',
+  'Binance spot (data-api)': 'https://data-api.binance.vision/api/v3/ticker/bookTicker?symbol=BTCUSDT',
+  'Binance spot (api)': 'https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT',
+};
+async function probeFromHere() {
+  const out = {};
+  try {
+    const tr = await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text();
+    out.location = tr.split('\n').filter((l) => /^(colo|loc)=/.test(l)).join(' ');
+  } catch (e) { out.location = String(e.message || e); }
+  for (const [name, u] of Object.entries(PROBE_URLS)) {
+    const t0 = Date.now();
+    try { const r = await fetch(u); await r.arrayBuffer(); out[name] = { status: r.status, ms: Date.now() - t0 }; }
+    catch (e) { out[name] = { error: String(e.message || e).slice(0, 120) }; }
+  }
+  return out;
+}
+
 // ---------- routes ----------
 export default {
   async fetch(request, env) {
@@ -485,17 +543,9 @@ export default {
     }
 
     if (url.pathname === '/probe') {
-      const out = {};
-      try { out.egress = (await (await fetch('https://www.cloudflare.com/cdn-cgi/trace')).text()).split('\n').filter((l) => /^(ip|colo|loc)=/.test(l)); } catch (e) { out.egress = String(e); }
-      for (const [name, base] of Object.entries(BASES)) {
-        for (const path of ['/system/config', '/bbo/BTC-USD-PERP']) {
-          try {
-            const t0 = Date.now();
-            const r = await fetch(base + path);
-            out[`${name} ${path}`] = { status: r.status, ms: Date.now() - t0 };
-          } catch (e) { out[`${name} ${path}`] = { error: String(e) }; }
-        }
-      }
+      // From the Cloudflare location nearest the caller, then from the engine (Seoul, near Paradex).
+      const out = { here: await probeFromHere() };
+      try { out.engine = await (await engine(env).fetch('https://engine/probe')).json(); } catch (e) { out.engine = { error: String(e.message || e) }; }
       return Response.json(out);
     }
 

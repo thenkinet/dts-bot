@@ -199,8 +199,42 @@ export function timingLine(sig, marks) {
   return `Timing: ${parts.join(' -> ')}.${total}`;
 }
 
+// Paradex mid, last trade and spread against Paradex's mark price, in bp (1 bp = 0.01%).
+// A mid far from the mark means a thin or broken book: the liquidity risk we watch.
+export function markGaps(s) {
+  const m = Number(s?.mark), pm = s?.pd ? mid(s.pd.bid, s.pd.ask) : null;
+  if (!(m > 0) || !pm) return { mid: null, last: null, spread: null, index: null };
+  return {
+    mid: bps(pm, m),
+    last: Number(s.last) > 0 ? bps(Number(s.last), m) : null,
+    spread: ((s.pd.ask - s.pd.bid) / pm) * 10_000,
+    index: Number(s.index) > 0 ? bps(m, Number(s.index)) : null,
+  };
+}
+
+export function describeMark(label, samples, limit) {
+  const g = samples.map(markGaps).filter((x) => x.mid != null);
+  if (!g.length) return `${label}: no mark price samples yet.`;
+  const absMid = g.map((x) => Math.abs(x.mid)), absLast = g.map((x) => x.last).filter((x) => x != null).map(Math.abs);
+  const sp = g.map((x) => x.spread), over = absMid.filter((x) => x > limit).length;
+  return `${label} (${g.length} minutes): Paradex mid vs mark ${median(absMid).toFixed(1)} bp typical, ${Math.max(...absMid).toFixed(1)} bp worst`
+    + (absLast.length ? `; last trade vs mark ${median(absLast).toFixed(1)} bp typical, ${Math.max(...absLast).toFixed(1)} bp worst` : '')
+    + `; spread ${median(sp).toFixed(1)} bp typical, ${pct(sp, 0.95).toFixed(1)} bp at the widest 5%. `
+    + (over ? `${over} minute(s) beyond the ${limit} bp guard.` : `Never beyond the ${limit} bp guard.`);
+}
+
 // Binance price that TradingView sent vs the Paradex book when the engine looked, and the fill.
-export function priceLine(sig, marks, fills) {
+// With the execution report: the Paradex mid and mark are the reference, TradingView is for information.
+export function priceLine(sig, marks, fills, report) {
+  if (report && report.ref) {
+    const ref = Number(report.ref), parts = [];
+    parts.push(`Paradex ${report.bidAtStart}/${report.askAtStart}, mid ${ref.toFixed(1)}`
+      + (report.markAtStart ? ` (mark ${Number(report.markAtStart).toFixed(1)}, ${f1(report.markGapBps)} bp)` : ''));
+    const px = fills.map((f) => Number(f.price)).filter((x) => x > 0);
+    if (px.length) parts.push(`filled ${px.join(', ')} (${px.map((x) => f1(bps(x, ref))).join(', ')} bp vs mid)`);
+    if (Number(sig.price) > 0) parts.push(`TradingView (Binance USDT) ${Number(sig.price)}, ${f1(bps(ref, Number(sig.price)))} bp`);
+    return `Prices: ${parts.join(' | ')}.`;
+  }
   const tv = Number(sig.price) > 0 ? Number(sig.price) : null;
   const pm = marks.book ? mid(marks.book.bid, marks.book.ask) : null;
   const parts = [];

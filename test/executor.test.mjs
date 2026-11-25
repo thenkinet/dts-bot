@@ -163,5 +163,35 @@ const base = { market: 'BTC-USD-PERP', size: '0.01', maxSlippageBps: 20, pollMs:
   check('D3 halted: no order sent', px.sent.length === 0 && r.stopped === 'HALTED');
 }
 
+// 18. Venue reference: the cap is set around the Paradex mid, not the signal's (Binance USDT) price
+{
+  const px = new FakeParadex({ bid: 100, ask: 100.5 });
+  // A Binance price 0.5% above Paradex would allow paying up to 100.95; the venue cap is 100.45 -> 100 (tick 0.5).
+  const r = await executeSignal(px, { id: 'v1', side: 'long', price: 100.75 }, { ...base, mode: 'taker', reference: 'venue' }, fakeClock(px));
+  check('venue reference: ref is the Paradex mid 100.25, signal price kept for the report', r.ref === '100.25' && r.signalPrice === 100.75 && r.refSource === 'paradex mid');
+  check('venue reference: cap 100.25 +0.2% -> 100 at tick 0.5, so the ask 100.5 is refused', px.sent.length === 0 && !r.ok && /beyond cap/.test(r.legs[0]?.stopped || ''));
+  const px2 = new FakeParadex({ bid: 100, ask: 100.5 });
+  const r2 = await executeSignal(px2, { id: 'v2', side: 'short', price: 99.5 }, { ...base, mode: 'taker', reference: 'venue', maxSlippageBps: 50 }, fakeClock(px2));
+  check('venue reference: a Binance price 0.75% lower does not stop a short that Paradex can fill', r2.ok && r2.after === '-0.01');
+}
+
+// 19. Mark guard: refuse when the mid is far from the mark, or when the mark is missing
+{
+  const mk = (mark) => { const px = new FakeParadex({ bid: 100, ask: 100.5 }); px.marketSummary = async () => ({ mark_price: String(mark), last_traded_price: '100.2' }); return px; };
+  const cfg = { ...base, mode: 'taker', reference: 'venue', maxMarkGapBps: 50 };
+  const ok = mk(100.2);
+  const r1 = await executeSignal(ok, { id: 'm1', side: 'long' }, { ...cfg, maxSlippageBps: 50 }, fakeClock(ok));
+  check('mark guard: mid 100.25 vs mark 100.2 (5 bp) trades', r1.ok && r1.markGapBps === 4.99 && r1.markAtStart === '100.2');
+  const far = mk(99.5);
+  const r2 = await executeSignal(far, { id: 'm2', side: 'long' }, cfg, fakeClock(far));
+  check('mark guard: mid 75 bp from the mark sends nothing', far.sent.length === 0 && !r2.ok && /from the mark price/.test(r2.refused));
+  const none = new FakeParadex({ bid: 100, ask: 100.5 }); none.marketSummary = async () => { throw new Error('HTTP 503'); };
+  const r3 = await executeSignal(none, { id: 'm3', side: 'long' }, cfg, fakeClock(none));
+  check('mark guard: no mark price, no order (fails closed)', none.sent.length === 0 && /mark price unavailable/.test(r3.refused));
+  const flat = mk(99.5); flat.pos = 0;
+  const r4 = await executeSignal(flat, { id: 'm4', side: 'flat' }, cfg, fakeClock(flat));
+  check('mark guard: nothing to do needs no mark', r4.ok && r4.note === 'already at target');
+}
+
 console.log(fail ? `\n${fail} executor check(s) failed` : '\nAll executor checks passed');
 process.exit(fail ? 1 : 0);

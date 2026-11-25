@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -105,6 +105,20 @@ await t('Tick summary: gap vs Binance close, typical and slowest delays', () => 
   assert.match(txt, /Gap: Paradex -9\.0 bp vs Binance/);
   assert.match(txt, /Binance bar close -> TradingView fires: 550 ms typical, 1\.0 s slowest 10%/);
   assert.match(describeTicks('Last hour', summariseTicks([])), /no TradingView ticks yet/);
+});
+
+await t('Mark gaps and the liquidity summary', () => {
+  const g = markGaps({ pd: { bid: 99.9, ask: 100.1 }, mark: 100.05, last: 100.15, index: 100 });
+  assert.ok(Math.abs(g.mid + 5) < 0.01 && Math.abs(g.last - 10) < 0.01 && Math.abs(g.spread - 20) < 0.01 && Math.abs(g.index - 5) < 0.01);
+  assert.equal(markGaps({ pd: { bid: 1, ask: 2 } }).mid, null);
+  const txt = describeMark('Liquidity, last hour', [{ pd: { bid: 99.9, ask: 100.1 }, mark: 100 }, { pd: { bid: 100.5, ask: 100.7 }, mark: 100 }], 50);
+  assert.match(txt, /2 minutes/); assert.match(txt, /60\.0 bp worst/); assert.match(txt, /1 minute\(s\) beyond the 50 bp guard/);
+  assert.match(describeMark('x', [], 50), /no mark price samples/);
+});
+
+await t('Price line with the execution report: Paradex mid and mark lead, TradingView for information', () => {
+  const line = priceLine({ price: 60050 }, {}, [{ price: '59950' }], { ref: '59945', bidAtStart: '59940', askAtStart: '59950', markAtStart: '59942', markGapBps: 0.5 });
+  assert.equal(line, 'Prices: Paradex 59940/59950, mid 59945.0 (mark 59942.0, +0.5 bp) | filled 59950 (+0.8 bp vs mid) | TradingView (Binance USDT) 60050, -17.5 bp.');
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');

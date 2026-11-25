@@ -8,6 +8,14 @@
 //   'maker'  post-only at the touch, re-posted at the new touch while time remains,
 //            then IOC fallback (same cap) for whatever is unfilled. Test bench for Track B.
 //
+// Reference price (cfg.reference):
+//   'venue'  the Paradex mid (best bid + best ask) / 2 when the signal starts. The live bot uses
+//            this: signals come from Binance in USDT, orders trade on Paradex in USD, so the cap
+//            is set where we actually trade. The signal's price is kept for the report only.
+//   'signal' the signal's price when it has one (the kit's original behaviour), else the mid.
+// Mark guard (cfg.maxMarkGapBps > 0): before any order, the Paradex mid must be within that many
+// basis points of Paradex's mark price; otherwise the book is too thin or broken and nothing is sent.
+//
 // Safety rules (from Quant 2's reviews):
 // - Never decide the next order before the previous one is in a FINAL state (Paradex Retail
 //   delays every submit and cancel by 300 ms). If an order's state stays unknown, the leg stops.
@@ -23,6 +31,8 @@ export const DEFAULTS = {
   size: '0.001',           // position size per signal, in base units
   maxPosition: null,       // hard cap on |position| (required by the Engine)
   maxSlippageBps: 20,      // cap around the reference price
+  reference: 'signal',     // 'venue' (Paradex mid) or 'signal' (the signal's price); the bot sets 'venue'
+  maxMarkGapBps: 0,        // > 0: refuse when the Paradex mid is further than this from the mark price
   takerAttempts: 3,        // IOC attempts per leg
   makerWindowMs: 60_000,   // patience before the IOC fallback
   makerReposts: 4,         // re-posts at the new touch within the window
@@ -110,10 +120,29 @@ export async function executeSignal(px, signal, cfgIn = {}, deps = {}) {
   const top0 = await px.bestPrices(market);
   const sides = [top0.bid, top0.ask].filter(Boolean).map(Number);
   const mid0 = sides.length ? sides.reduce((a, b) => a + b, 0) / sides.length : null;
-  const ref = signal.price ?? mid0;
-  Object.assign(report, { ref: ref == null ? null : String(ref), bidAtStart: top0.bid, askAtStart: top0.ask });
+  const ref = cfg.reference === 'venue' ? (mid0 ?? null) : (signal.price ?? mid0);
+  Object.assign(report, { ref: ref == null ? null : String(ref), refSource: cfg.reference === 'venue' || signal.price == null ? 'paradex mid' : 'signal',
+    bidAtStart: top0.bid, askAtStart: top0.ask, signalPrice: signal.price ?? null });
   if (legs.length === 0) { report.after = report.before; report.ok = true; report.note = 'already at target'; return report; }
-  if (!ref) throw new Error('no reference price: the signal has none and the book is empty');
+  if (!ref) throw new Error(cfg.reference === 'venue' ? 'no reference price: the Paradex book is empty' : 'no reference price: the signal has none and the book is empty');
+
+  // Mark guard: fail closed. No mark, or a mid far from it, means no order.
+  if (Number(cfg.maxMarkGapBps) > 0) {
+    let mark = null;
+    try { const s = await px.marketSummary(market); mark = Number(s.mark_price); report.lastAtStart = s.last_traded_price ?? null; } catch (e) { report.markError = String(e.message || e); }
+    if (!(mark > 0)) {
+      report.refused = `mark price unavailable (${report.markError || 'empty'}): not trading blind`;
+      report.after = report.before; report.ok = false;
+      return report;
+    }
+    report.markAtStart = String(mark);
+    report.markGapBps = Math.round(((mid0 - mark) / mark) * 10_000 * 100) / 100;
+    if (!(Math.abs(report.markGapBps) <= Number(cfg.maxMarkGapBps))) {
+      report.refused = `Paradex mid ${mid0} is ${report.markGapBps} bp from the mark price ${mark} (limit ${cfg.maxMarkGapBps} bp): book too thin or broken, not trading`;
+      report.after = report.before; report.ok = false;
+      return report;
+    }
+  }
 
   const readPos = async () => { pos = signedPosition(await px.positions(), market); return pos; };
 

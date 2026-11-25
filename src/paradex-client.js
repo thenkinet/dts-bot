@@ -200,6 +200,14 @@ export class Paradex {
     return this.priv('POST', '/orders', { body, idempotent: false });
   }
 
+  // Mark price, last trade, index (oracle) price, funding: Paradex's market summary. Public.
+  async marketSummary(symbol) {
+    const r = await call(this.base, 'GET', `/markets/summary?market=${encodeURIComponent(symbol)}`);
+    const m = (r.results || []).find((x) => x.symbol === symbol) || (r.results || [])[0];
+    if (!m) throw new Error(`no market summary for ${symbol}`);
+    return m;
+  }
+
   getOrderByClientId(clientId) { return this.priv('GET', `/orders/by_client_id/${encodeURIComponent(clientId)}`); }
   // Named accountInfo, not account: this.account holds the account address, and an instance
   // property would hide a method of the same name (it did: "account is not a function").
