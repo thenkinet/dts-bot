@@ -8,7 +8,7 @@
 //   POST /signal     Track A: a directional signal {id, side: long|short|flat, price?, size?} for the Engine
 //   GET  /engine     the Engine's state: last report, target, queue (header x-admin-token required)
 //   POST /telegram   Telegram webhook, allowed chat only:
-//                    /status, /check, /spread (Binance vs Paradex, speed), /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
+//                    /status, /check, /spread [7d|full] (Paradex health: price vs mark, spread, speed), /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
 //                    (allowed chat AND allowed sender ids)
 import { DurableObject } from 'cloudflare:workers';
 import { Paradex, BASES } from './paradex-client.js';
@@ -17,7 +17,7 @@ import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
-  TICK_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark } from './market-watch.js';
+  TICK_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport } from './market-watch.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -114,7 +114,11 @@ export class Engine extends DurableObject {
       return Response.json({ recorded: true });
     }
     if (url.pathname === '/probe') return Response.json(await probeFromHere());
-    if (url.pathname === '/market') return new Response(await this.marketReport(), { headers: { 'content-type': 'text/plain' } });
+    if (url.pathname === '/market') {
+      const days = url.searchParams.get('range') === '7d' ? 7 : 1;
+      const text = url.searchParams.get('full') ? await this.marketReport() : await this.shortMarket(days);
+      return new Response(text, { headers: { 'content-type': 'text/plain' } });
+    }
     if (url.pathname === '/state') {
       return Response.json({
         target: await st.get('target'), last: await st.get('last'), queue: (await st.get('queue')) || [],
@@ -228,7 +232,23 @@ export class Engine extends DurableObject {
     }
   }
 
-  // /spread: where the engine runs, how fast Paradex answers from there, and Binance vs Paradex.
+  // /spread (and /spread 7d): the short report. Verdict, now, then p50 / p99 / max over the range.
+  async shortMarket(days = 1) {
+    const env = this.env, st = this.ctx.storage;
+    const now = await takeSample(this.px(), env.MARKET, { binance: false });
+    try { const m = await this.px().marketSummary(env.MARKET); now.mark = Number(m.mark_price); } catch { /* verdict says unavailable */ }
+    const since = Date.now() - days * 86_400_000;
+    const samples = [...(await st.list({ prefix: SAMPLE_PREFIX, start: `${SAMPLE_PREFIX}${String(since).padStart(15, '0')}` })).values()];
+    let status = '';
+    try {
+      const pos = signedPosition(await this.px().positions(), env.MARKET);
+      const halted = (await controlCall(env, '')).halted;
+      status = `Position ${pos === 0n ? 'flat' : `${pos > 0n ? 'long' : 'short'} ${fromInt8(pos < 0n ? -pos : pos)}`} · bot ${halted ? 'paused' : 'running'}`;
+    } catch (e) { status = `Position unknown (${String(e.message || e).slice(0, 80)})`; }
+    return shortReport({ now, samples, guard: Number(env.MAX_MARK_GAP_BPS || 50), label: days === 7 ? 'Last 7 days' : 'Last 24 h', status });
+  }
+
+  // /spread full: where the engine runs, how fast Paradex answers from there, and Binance vs Paradex.
   async marketReport() {
     const env = this.env, st = this.ctx.storage, lines = [];
     try {
@@ -246,17 +266,17 @@ export class Engine extends DurableObject {
       lines.push(`Mark ${Number(m.mark_price).toFixed(1)}, last trade ${m.last_traded_price}, index (oracle) ${Number(m.underlying_price).toFixed(1)}.`
         + (g.mid != null ? ` Mid ${g.mid >= 0 ? '+' : ''}${g.mid.toFixed(1)} bp vs mark (guard ${Number(env.MAX_MARK_GAP_BPS || 50)} bp).` : ''));
     } catch { lines.push('Mark price unavailable: signals would be refused.'); }
-    const ownAll = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()];
+    const ownAll = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()].filter((x) => x.t > Date.now() - 86_400_000);
     const limitBps = Number(env.MAX_MARK_GAP_BPS || 50);
     lines.push(describeMark('Liquidity, last hour', ownAll.filter((x) => x.t > Date.now() - 3_600_000), limitBps));
     lines.push(describeMark('Liquidity, last 24 h', ownAll, limitBps));
     if (now.bn) lines.push(describeNow(now));
-    const ticks = [...(await st.list({ prefix: TICK_PREFIX })).values()];
+    const ticks = [...(await st.list({ prefix: TICK_PREFIX })).values()].filter((k) => k.t > Date.now() - 86_400_000);
     const last = ticks.at(-1);
     if (last) lines.push(`Last TradingView tick ${Math.round((Date.now() - last.t) / 1000)} s ago: Binance close ${last.price}.`);
     lines.push(describeTicks('Last hour', summariseTicks(ticks.filter((k) => k.t > Date.now() - 3_600_000))));
     lines.push(describeTicks('Last 24 h', summariseTicks(ticks)));
-    const own = [...(await st.list({ prefix: SAMPLE_PREFIX })).values()].filter((x) => x.pd);
+    const own = ownAll.filter((x) => x.pd);
     if (own.length) lines.push(`Engine's own minute checks (${own.length}): Paradex answers in ${Math.round(summarise(own).pdMs)} ms typical.`);
     try {
       const m = await this.px().market(env.MARKET);
@@ -385,12 +405,12 @@ const paradex = (env, { kill = false } = {}) => new Paradex({
   interactive: env.PARADEX_INTERACTIVE === 'true',
 });
 
-async function telegram(env, text, chatId = env.TELEGRAM_CHAT_ID) {
+async function telegram(env, text, chatId = env.TELEGRAM_CHAT_ID, parseMode) {
   if (!env.TELEGRAM_BOT_TOKEN || !chatId) return false;
   const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({ chat_id: chatId, text, ...(parseMode ? { parse_mode: parseMode } : {}) }),
   });
   return r.ok;
 }
@@ -407,7 +427,7 @@ async function webhookSecret(env) {
 const COMMANDS = [
   { command: 'status', description: 'Position, limits, last signal' },
   { command: 'check', description: 'Check: tiny order far from the price, cancelled' },
-  { command: 'spread', description: 'Binance vs Paradex prices, speed' },
+  { command: 'spread', description: 'Paradex health: price vs mark, spread, speed (7d, full)' },
   { command: 'killall', description: 'Halt and cancel every order' },
   { command: 'flatten', description: 'While halted: close positions' },
   { command: 'resume', description: 'Lift the halt' },
@@ -634,7 +654,12 @@ export default {
           await telegram(env, `Check on Paradex ${env.PARADEX_ENV}:\n${lines.join('\n').slice(0, 3500)}`);
         }
         if (cmd === '/spread') {
-          await telegram(env, (await (await engine(env).fetch('https://engine/market')).text()).slice(0, 3500));
+          // /spread: last 24 h, short. /spread 7d: last 7 days. /spread full: every detail.
+          const arg = ((msg.text || '').trim().split(/\s+/)[1] || '').toLowerCase();
+          const q = arg === 'full' ? '?full=1' : arg === '7d' ? '?range=7d' : '';
+          const text = (await (await engine(env).fetch(`https://engine/market${q}`)).text()).slice(0, 3500);
+          if (arg === 'full') await telegram(env, text);
+          else await telegram(env, `<pre>${esc(text)}</pre>`, env.TELEGRAM_CHAT_ID, 'HTML');   // fixed-width, so the table lines up
         }
         if (cmd === '/status') {
           const s = await controlCall(env, '');
