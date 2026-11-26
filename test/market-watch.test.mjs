@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -146,6 +146,23 @@ await t('Verdict: OK, thin past half the guard, blocked past the guard or withou
   assert.equal(verdict(51, 50).icon, '⛔');
   assert.equal(verdict(null, 50).icon, '⛔');
   assert.match(shortReport({ now: { pd: { bid: 1, ask: 2 } }, samples: [], guard: 50, label: 'Last 24 h' }), /mark price unavailable[\s\S]*Last 24 h: no samples yet/);
+});
+
+await t('Latency: end-to-end per tool without its clock; split only when the tool sends a firing time', () => {
+  const barOpen = Date.parse('2026-11-26T10:00:00Z'), close = barOpen + 60_000;
+  const d = tickDelays({ barOpen, interval: '1', tvAt: NaN, edgeAt: close + 900, engineAt: close + 970 });
+  assert.equal(d.endToEnd, 900); assert.equal(d.binanceToTv, null); assert.equal(d.tvToCloudflare, null);
+  const tv = Array.from({ length: 100 }, (_, i) => ({ t: i, delays: { binanceToTv: 300 + i, tvToCloudflare: 1700 + i, cloudflareToEngine: 70 } }));  // old ticks: no src, no endToEnd
+  const tp = Array.from({ length: 100 }, (_, i) => ({ t: i, src: 'takeprofit', delays: { endToEnd: 900 + i, cloudflareToEngine: 72 } }));
+  assert.equal(tickSource(tv[0]), 'tradingview');
+  const txt = latencyReport({ ticks: [...tv, ...tp], samples: [{ pd: { ms: 41 } }, { pd: { ms: 43 } }], label: 'last 24 h', at: Date.parse('2026-11-26T12:40:00Z') });
+  assert.match(txt, /^⏱ Latency · last 24 h · 12:40 UTC/);
+  assert.match(txt, /takeprofit\s+100\s+949\s+998\s+999/);
+  assert.match(txt, /tradingview\s+100\s+2098\s+2196\s+2198/);           // derived from trigger + delivery
+  assert.match(txt, /tradingv·trigger\s+100\s+349/);
+  assert.doesNotMatch(txt, /takeprof·trigger/);   // no split for a tool without its own clock
+  assert.match(txt, /Clock check: fastest delivery 1700 ms, never negative/);
+  assert.match(latencyReport({ ticks: [], samples: [], label: 'last 24 h' }), /No charting-tool ticks yet/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
