@@ -98,14 +98,25 @@ export const toolName = (src) => TOOL[src] || src.slice(0, 8);
 
 // Webhooks that never arrived: one tick is due per 1-minute bar close, from the tool's first tick in
 // the range until 20 s ago (the latest bar may still be on its way). A rejected webhook counts as missed.
+// OFF_MIN or more missing minutes in a row mean the alert was off (paused, edited, expired): those are
+// reported apart and left out of the uptime. Shorter gaps are lost webhooks.
+export const OFF_MIN = 5;
 export function delivery(ks, at = Date.now()) {
   const closes = new Set(ks.map((k) => k.delays?.closeAt).filter((x) => Number.isFinite(x)));
   if (!closes.size) return null;
   const first = Math.min(...closes), last = Math.floor((at - 20_000) / 60_000) * 60_000;
-  const missed = [];
-  for (let c = first; c <= last; c += 60_000) if (!closes.has(c)) missed.push(c);
-  const due = last >= first ? Math.round((last - first) / 60_000) + 1 : 0;
-  return { due, got: due - missed.length, missed };
+  const runs = [];
+  for (let c = first; c <= last; c += 60_000) {
+    if (closes.has(c)) continue;
+    const r = runs.at(-1);
+    if (r && c === r.to + 60_000) r.to = c; else runs.push({ from: c, to: c });
+  }
+  for (const r of runs) r.n = Math.round((r.to - r.from) / 60_000) + 1;
+  const off = runs.filter((r) => r.n >= OFF_MIN);
+  const missed = runs.filter((r) => r.n < OFF_MIN).flatMap((r) => Array.from({ length: r.n }, (_, i) => r.from + i * 60_000));
+  const all = last >= first ? Math.round((last - first) / 60_000) + 1 : 0;
+  const offN = off.reduce((a, r) => a + r.n, 0);
+  return { due: all - offN, got: all - offN - missed.length, missed, off, offNow: Boolean(off.length && off.at(-1).to === last) };
 }
 
 export function latencyReport({ ticks, samples, label, at = Date.now() }) {
@@ -117,7 +128,7 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   const bySrc = {};
   for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
   const names = Object.keys(bySrc).sort();
-  if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set up a 1-minute alert to /tick.']).join('\n');
+  if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set a 1-min alert to /tick.']).join('\n');
   out.push('Bar close → bot (ms)', head(''));
   const counts = [];
   for (const n of names) {
@@ -125,15 +136,20 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
     out.push(line(toolName(n), v)); counts.push(`${toolName(n)} ${v.length}`);
   }
   out.push(`(minutes: ${counts.join(' · ')})`);
-  const dv = names.map((n) => [n, delivery(bySrc[n], at)]).filter(([, d]) => d && d.due);
+  const dv = names.map((n) => [n, delivery(bySrc[n], at)]).filter(([, d]) => d && (d.due || d.off.length));
   if (dv.length) {
+    const hm = (ms) => new Date(ms).toISOString().slice(11, 16);
     out.push('', `${'Webhooks'.padEnd(9)}${'arrived'.padStart(11)}${'up'.padStart(7)}`);
     for (const [n, d] of dv) {
-      const up = (Math.floor((d.got / d.due) * 1000) / 10).toFixed(1);
-      out.push(`${toolName(n).padEnd(9)}${`${d.got}/${d.due}`.padStart(11)}${`${up}%`.padStart(7)}`);
+      const up = d.due ? `${(Math.floor((d.got / d.due) * 1000) / 10).toFixed(1)}%` : '-';
+      out.push(`${toolName(n).padEnd(9)}${`${d.got}/${d.due}`.padStart(11)}${up.padStart(7)}`);
     }
-    for (const [n, d] of dv) if (d.missed.length) {
-      out.push(`${toolName(n)} missed ${d.missed.length} · last ${new Date(d.missed.at(-1)).toISOString().slice(11, 16)}`);
+    for (const [n, d] of dv) {
+      const t = toolName(n);
+      if (d.missed.length) out.push(`${t} lost ${d.missed.length} · last ${hm(d.missed.at(-1))}`);
+      if (d.offNow) out.push(`${t} off since ${hm(d.off.at(-1).from)} ⚠️`);
+      else if (d.off.length === 1) out.push(`${t} off ${d.off[0].n}m · ${hm(d.off[0].from)}-${hm(d.off[0].to)}`);
+      else if (d.off.length) out.push(`${t} off ${d.off.reduce((a, r) => a + r.n, 0)}m · ${d.off.length} gaps`);
     }
   }
   for (const n of names.filter((x) => bySrc[x].some((k) => Number.isFinite(k.delays?.tvToCloudflare)))) {
@@ -150,7 +166,7 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   const deliv = ticks.map((k) => k.delays?.tvToCloudflare).filter((x) => Number.isFinite(x));
   if (deliv.length) {
     const lo = Math.min(...deliv);
-    out.push('', lo < 0 ? `Clock ⚠️ a tool's clock runs ${Math.round(-lo)} ms ahead` : `Clock ✓ fastest delivery ${Math.round(lo)} ms`);
+    out.push('', lo < 0 ? `Clock ⚠️ tool ${Math.round(-lo)} ms ahead` : `Clock ✓ fastest ${Math.round(lo)} ms`);   // <= 27 wide
   }
   return out.join('\n');
 }
@@ -333,7 +349,7 @@ export function shortReport({ now, samples, guard, label, status, at = Date.now(
     lines.push(row('spread', ub(pctR(spreads, 0.5)), ub(pctR(spreads, 0.99)), ub(Math.max(...spreads))));
     if (ms.length) lines.push(row('speed ms', Math.round(pctR(ms, 0.5)), Math.round(pctR(ms, 0.99)), Math.round(Math.max(...ms))));
     lines.push('');
-    lines.push(`Guard ${guard} bp: ${over ? `hit ${over} of ${g.length} min` : `never (${g.length} min)`}`);
+    lines.push(`Guard ${guard} bp hit ${over}/${g.length} min`);
   } else {
     lines.push(`${label}: no samples yet`);
   }
