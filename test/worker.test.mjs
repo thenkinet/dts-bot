@@ -87,5 +87,12 @@ await t('/tick refuses a wrong secret, a bad price and a stale time; never reach
   assert.equal((await post({ secret: base.SIGNAL_SECRET, ts: '2020-01-01T00:00:00Z', price: 1 })).status, 400);
 });
 
+await t('/tick: a bad source name or a missing bar time is refused', async () => {
+  const post = (b) => worker.fetch(req('/tick', { method: 'POST', body: JSON.stringify(b) }), base);
+  const bar = new Date(Date.now() - 60_000).toISOString();
+  assert.equal((await post({ secret: base.SIGNAL_SECRET, bar, price: 1, src: 'Take Profit!' })).status, 400);
+  assert.equal((await post({ secret: base.SIGNAL_SECRET, price: 1, src: 'takeprofit' })).status, 400);
+});
+
 console.log(fails ? `\n${fails} worker check(s) FAILED` : '\nAll worker checks passed');
 process.exit(fails ? 1 : 0);

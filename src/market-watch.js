@@ -72,15 +72,59 @@ export async function takeSample(px, market, { symbol, binance = true, fetchFn =
 
 // A TradingView bar-close alert: {{time}} is the bar's open, {{interval}} its length in minutes
 // ("1"), {{timenow}} when TradingView fired (to the second). Returns the delays in ms.
+// endToEnd (bar close -> Cloudflare) needs no clock but Cloudflare's: the bar's close is exact by definition.
+// The split into trigger and delivery needs the tool's own firing time (ms), when it sends one.
 export function tickDelays({ barOpen, interval, tvAt, edgeAt, engineAt }) {
   const mins = Number(interval);
   const closeAt = Number.isFinite(barOpen) && mins > 0 ? barOpen + mins * 60_000 : null;
   return {
     closeAt,
+    endToEnd: closeAt ? edgeAt - closeAt : null,
     binanceToTv: closeAt && Number.isFinite(tvAt) ? tvAt - closeAt : null,
     tvToCloudflare: Number.isFinite(tvAt) ? edgeAt - tvAt : null,
     cloudflareToEngine: engineAt - edgeAt,
   };
+}
+
+// ---- /latency: one scoreboard per charting tool ----
+// Ticks recorded before source tags existed came from TradingView.
+export const tickSource = (k) => k.src || 'tradingview';
+const e2e = (k) => k.delays?.endToEnd ?? (Number.isFinite(k.delays?.binanceToTv) && Number.isFinite(k.delays?.tvToCloudflare)
+  ? k.delays.binanceToTv + k.delays.tvToCloudflare : null);
+
+export function latencyReport({ ticks, samples, label, at = Date.now() }) {
+  const P = (a, p) => (a.length ? [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.max(0, Math.ceil(p * a.length) - 1))] : null);
+  const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
+  const line = (name, vals) => `${name.padEnd(17).slice(0, 17)}${String(vals.length).padStart(5)}${ms(P(vals, 0.5)).padStart(7)}${ms(P(vals, 0.99)).padStart(7)}${ms(vals.length ? Math.max(...vals) : null).padStart(7)}`;
+  const head = (title) => `${title.padEnd(17)}${'n'.padStart(5)}${'p50'.padStart(7)}${'p99'.padStart(7)}${'max'.padStart(7)}`;
+  const out = [`⏱ Latency · ${label} · ${new Date(at).toISOString().slice(11, 16)} UTC`, ''];
+  const bySrc = {};
+  for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
+  const names = Object.keys(bySrc).sort();
+  if (!names.length) return out.concat(['No charting-tool ticks yet: set up a 1-minute alert to /tick.']).join('\n');
+  out.push(head('Bar close→bot ms'));
+  for (const n of names) out.push(line(n, bySrc[n].map(e2e).filter((x) => Number.isFinite(x))));
+  const split = names.filter((n) => bySrc[n].some((k) => Number.isFinite(k.delays?.tvToCloudflare)));
+  if (split.length) {
+    out.push('', head('Split, ms'));
+    for (const n of split) {
+      const ks = bySrc[n].filter((k) => Number.isFinite(k.delays?.tvToCloudflare));
+      out.push(line(`${n.slice(0, 8)}·trigger`, ks.map((k) => k.delays.binanceToTv).filter((x) => Number.isFinite(x))));
+      out.push(line(`${n.slice(0, 8)}·delivery`, ks.map((k) => k.delays.tvToCloudflare)));
+    }
+  }
+  const hop = ticks.map((k) => k.delays?.cloudflareToEngine).filter((x) => Number.isFinite(x));
+  const pdx = samples.map((s) => s.pd?.ms).filter((x) => Number.isFinite(x));
+  out.push('', head('Inside the bot, ms'));
+  if (hop.length) out.push(line('door → Seoul', hop));
+  if (pdx.length) out.push(line('Seoul ↔ Paradex', pdx));
+  const deliv = ticks.map((k) => k.delays?.tvToCloudflare).filter((x) => Number.isFinite(x));
+  if (deliv.length) {
+    const lo = Math.min(...deliv);
+    out.push('', lo < 0 ? `Clock check: a delivery arrived ${Math.round(-lo)} ms "before" it was sent: the tool's clock runs ahead.`
+      : `Clock check: fastest delivery ${Math.round(lo)} ms, never negative ✓`);
+  }
+  return out.join('\n');
 }
 
 const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
@@ -105,7 +149,7 @@ export function describeTicks(label, m) {
   const dl = (x) => `${secs(x.med)} typical, ${secs(x.p90)} slowest 10%`;
   return `${label} (${m.n} TradingView ticks):`
     + (m.nGap ? `\n- Gap: Paradex ${f1(m.gapMean)} bp vs Binance on average (from ${f1(m.gapMin)} to ${f1(m.gapMax)}). Paradex spread ${m.pdSpread.toFixed(2)} bp.` : '')
-    + `\n- Binance bar close -> TradingView fires: ${dl(m.binanceToTv)} (TradingView time is to the second).`
+    + `\n- Binance bar close -> TradingView fires: ${dl(m.binanceToTv)}.`
     + `\n- TradingView -> Cloudflare: ${dl(m.tvToCloudflare)}.`
     + `\n- Cloudflare -> engine in Asia: ${dl(m.cloudflareToEngine)}.`
     + (m.pdMs != null ? `\n- Paradex answers the engine in ${secs(m.pdMs)} typical.` : '');
