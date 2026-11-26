@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource, delivery } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -167,6 +167,22 @@ await t('Latency: end-to-end per tool without its clock; split only when the too
   assert.match(txt, /Clock ✓ fastest delivery 1700 ms/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 32), 'fits a phone');
   assert.match(latencyReport({ ticks: [], samples: [], label: '24h' }), /No charting-tool ticks yet/);
+});
+
+await t('Webhooks: missed bar closes counted per tool, rejected or lost alike', () => {
+  const c0 = Date.parse('2026-11-26T10:00:00Z');
+  const lost = new Set([5, 6, 40]);
+  const ks = Array.from({ length: 100 }, (_, i) => i).filter((i) => !lost.has(i))
+    .map((i) => ({ t: c0 + i * 60_000 + 2000, delays: { closeAt: c0 + i * 60_000, binanceToTv: 300, tvToCloudflare: 1700 } }));
+  const at = c0 + 99 * 60_000 + 25_000;                       // the last bar is due
+  const d = delivery(ks, at);
+  assert.equal(d.due, 100); assert.equal(d.got, 97); assert.deepEqual(d.missed.map((c) => (c - c0) / 60_000), [5, 6, 40]);
+  assert.equal(delivery(ks, c0 + 99 * 60_000 + 5000).due, 99);   // the bar that just closed is not due yet
+  const txt = latencyReport({ ticks: ks, samples: [], label: '24h', at });
+  assert.match(txt, /\nTV\s+97\/100\s+97\.0%/);
+  assert.match(txt, /TV missed 3 · last 10:40/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 32), 'fits a phone');
+  assert.match(latencyReport({ ticks: ks.slice(0, 1), samples: [], label: '24h', at: c0 + 25_000 }), /TV\s+1\/1\s+100\.0%/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
