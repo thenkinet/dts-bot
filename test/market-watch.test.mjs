@@ -180,9 +180,28 @@ await t('Webhooks: missed bar closes counted per tool, rejected or lost alike', 
   assert.equal(delivery(ks, c0 + 99 * 60_000 + 5000).due, 99);   // the bar that just closed is not due yet
   const txt = latencyReport({ ticks: ks, samples: [], label: '24h', at });
   assert.match(txt, /\nTV\s+97\/100\s+97\.0%/);
-  assert.match(txt, /TV missed 3 · last 10:40/);
+  assert.match(txt, /TV lost 3 · last 10:40/);
+  assert.doesNotMatch(txt, /TV off/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
   assert.match(latencyReport({ ticks: ks.slice(0, 1), samples: [], label: '24h', at: c0 + 25_000 }), /TV\s+1\/1\s+100\.0%/);
+});
+
+await t('Webhooks: 5 or more missing minutes in a row = alert off, kept out of the uptime', () => {
+  const c0 = Date.parse('2026-11-26T13:00:00Z');
+  const gone = (i) => (i >= 12 && i <= 27) || i === 40 || i === 41;      // a 16-minute pause and 2 lost
+  const ks = Array.from({ length: 60 }, (_, i) => i).filter((i) => !gone(i))
+    .map((i) => ({ t: c0 + i * 60_000, delays: { closeAt: c0 + i * 60_000, binanceToTv: 300, tvToCloudflare: 1700 } }));
+  const at = c0 + 59 * 60_000 + 25_000;
+  const d = delivery(ks, at);
+  assert.equal(d.due, 44); assert.equal(d.got, 42); assert.equal(d.missed.length, 2); assert.equal(d.off.length, 1); assert.equal(d.offNow, false);
+  const txt = latencyReport({ ticks: ks, samples: [], label: '24h', at });
+  assert.match(txt, /\nTV\s+42\/44\s+95\.4%/);
+  assert.match(txt, /TV lost 2 · last 13:41/);
+  assert.match(txt, /TV off 16m · 13:12-13:27/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
+  // the alert stopped 10 minutes ago and is still off: say so
+  const now = latencyReport({ ticks: ks.slice(0, -10), samples: [], label: '24h', at });
+  assert.match(now, /TV off since 13:50 ⚠️/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
