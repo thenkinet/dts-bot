@@ -117,7 +117,7 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   const bySrc = {};
   for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
   const names = Object.keys(bySrc).sort();
-  if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set up a 1-minute alert to /tick.']).join('\n');
+  if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set a 1-min alert to /tick.']).join('\n');
   out.push('Bar close → bot (ms)', head(''));
   const counts = [];
   for (const n of names) {
@@ -150,7 +150,7 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   const deliv = ticks.map((k) => k.delays?.tvToCloudflare).filter((x) => Number.isFinite(x));
   if (deliv.length) {
     const lo = Math.min(...deliv);
-    out.push('', lo < 0 ? `Clock ⚠️ a tool's clock runs ${Math.round(-lo)} ms ahead` : `Clock ✓ fastest delivery ${Math.round(lo)} ms`);
+    out.push('', lo < 0 ? `Clock ⚠️ tool ${Math.round(-lo)} ms ahead` : `Clock ✓ fastest ${Math.round(lo)} ms`);   // <= 27 wide
   }
   return out.join('\n');
 }
@@ -333,7 +333,7 @@ export function shortReport({ now, samples, guard, label, status, at = Date.now(
     lines.push(row('spread', ub(pctR(spreads, 0.5)), ub(pctR(spreads, 0.99)), ub(Math.max(...spreads))));
     if (ms.length) lines.push(row('speed ms', Math.round(pctR(ms, 0.5)), Math.round(pctR(ms, 0.99)), Math.round(Math.max(...ms))));
     lines.push('');
-    lines.push(`Guard ${guard} bp: ${over ? `hit ${over} of ${g.length} min` : `never (${g.length} min)`}`);
+    lines.push(`Guard ${guard} bp hit ${over}/${g.length} min`);
   } else {
     lines.push(`${label}: no samples yet`);
   }

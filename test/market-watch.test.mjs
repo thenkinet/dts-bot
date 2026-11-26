@@ -137,9 +137,9 @@ await t('Short report: verdict, signed bp vs mark, p50 / p99 / max, guard, statu
   assert.match(txt, /vs mark\s+\+1\.0\s+\+3\.0\s+-40\.0/);    // the worst minute keeps its minus sign
   assert.match(txt, /spread\s+1\.7\s+1\.7\s+1\.7/);
   assert.match(txt, /speed ms\s+44\s+49\s+49/);
-  assert.match(txt, /Guard 50 bp: never \(100 min\)/);
+  assert.match(txt, /Guard 50 bp hit 0\/100 min/);
   assert.equal(lines.at(-1), 'Flat · bot paused');
-  assert.ok(lines.every((l) => [...l].length <= 32), 'fits a phone');
+  assert.ok(lines.every((l) => [...l].length <= 27), 'fits a phone');
 });
 
 await t('Verdict: OK, thin past half the guard, blocked past the guard or without a mark', () => {
@@ -164,8 +164,8 @@ await t('Latency: end-to-end per tool without its clock; split only when the too
   assert.match(txt, /TV split[\s\S]*trigger\s+349/);
   assert.match(txt, /minutes: TP 100 · TV 100/);
   assert.doesNotMatch(txt, /TP split/);   // no split for a tool without its own clock
-  assert.match(txt, /Clock ✓ fastest delivery 1700 ms/);
-  assert.ok(txt.split('\n').every((l) => [...l].length <= 32), 'fits a phone');
+  assert.match(txt, /Clock ✓ fastest 1700 ms/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
   assert.match(latencyReport({ ticks: [], samples: [], label: '24h' }), /No charting-tool ticks yet/);
 });
 
@@ -181,7 +181,7 @@ await t('Webhooks: missed bar closes counted per tool, rejected or lost alike', 
   const txt = latencyReport({ ticks: ks, samples: [], label: '24h', at });
   assert.match(txt, /\nTV\s+97\/100\s+97\.0%/);
   assert.match(txt, /TV missed 3 · last 10:40/);
-  assert.ok(txt.split('\n').every((l) => [...l].length <= 32), 'fits a phone');
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
   assert.match(latencyReport({ ticks: ks.slice(0, 1), samples: [], label: '24h', at: c0 + 25_000 }), /TV\s+1\/1\s+100\.0%/);
 });
 
