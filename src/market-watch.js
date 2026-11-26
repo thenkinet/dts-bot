@@ -92,37 +92,42 @@ export const tickSource = (k) => k.src || 'tradingview';
 const e2e = (k) => k.delays?.endToEnd ?? (Number.isFinite(k.delays?.binanceToTv) && Number.isFinite(k.delays?.tvToCloudflare)
   ? k.delays.binanceToTv + k.delays.tvToCloudflare : null);
 
+// Short names keep the table within a phone's width (about 30 characters of fixed-width text).
+const TOOL = { tradingview: 'TV', takeprofit: 'TP', mmt: 'MMT' };
+export const toolName = (src) => TOOL[src] || src.slice(0, 8);
+
 export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   const P = (a, p) => (a.length ? [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.max(0, Math.ceil(p * a.length) - 1))] : null);
   const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
-  const line = (name, vals) => `${name.padEnd(17).slice(0, 17)}${String(vals.length).padStart(5)}${ms(P(vals, 0.5)).padStart(7)}${ms(P(vals, 0.99)).padStart(7)}${ms(vals.length ? Math.max(...vals) : null).padStart(7)}`;
-  const head = (title) => `${title.padEnd(17)}${'n'.padStart(5)}${'p50'.padStart(7)}${'p99'.padStart(7)}${'max'.padStart(7)}`;
-  const out = [`⏱ Latency · ${label} · ${new Date(at).toISOString().slice(11, 16)} UTC`, ''];
+  const line = (name, vals) => `${name.padEnd(9).slice(0, 9)}${ms(P(vals, 0.5)).padStart(6)}${ms(P(vals, 0.99)).padStart(6)}${ms(vals.length ? Math.max(...vals) : null).padStart(6)}`;
+  const head = (title) => `${title.padEnd(9)}${'p50'.padStart(6)}${'p99'.padStart(6)}${'max'.padStart(6)}`;
+  const out = [`⏱ Latency ${label} · ${new Date(at).toISOString().slice(11, 16)} UTC`, ''];
   const bySrc = {};
   for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
   const names = Object.keys(bySrc).sort();
-  if (!names.length) return out.concat(['No charting-tool ticks yet: set up a 1-minute alert to /tick.']).join('\n');
-  out.push(head('Bar close→bot ms'));
-  for (const n of names) out.push(line(n, bySrc[n].map(e2e).filter((x) => Number.isFinite(x))));
-  const split = names.filter((n) => bySrc[n].some((k) => Number.isFinite(k.delays?.tvToCloudflare)));
-  if (split.length) {
-    out.push('', head('Split, ms'));
-    for (const n of split) {
-      const ks = bySrc[n].filter((k) => Number.isFinite(k.delays?.tvToCloudflare));
-      out.push(line(`${n.slice(0, 8)}·trigger`, ks.map((k) => k.delays.binanceToTv).filter((x) => Number.isFinite(x))));
-      out.push(line(`${n.slice(0, 8)}·delivery`, ks.map((k) => k.delays.tvToCloudflare)));
-    }
+  if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set up a 1-minute alert to /tick.']).join('\n');
+  out.push('Bar close → bot (ms)', head(''));
+  const counts = [];
+  for (const n of names) {
+    const v = bySrc[n].map(e2e).filter((x) => Number.isFinite(x));
+    out.push(line(toolName(n), v)); counts.push(`${toolName(n)} ${v.length}`);
+  }
+  out.push(`(minutes: ${counts.join(' · ')})`);
+  for (const n of names.filter((x) => bySrc[x].some((k) => Number.isFinite(k.delays?.tvToCloudflare)))) {
+    const ks = bySrc[n].filter((k) => Number.isFinite(k.delays?.tvToCloudflare));
+    out.push('', head(`${toolName(n)} split`));
+    out.push(line('trigger', ks.map((k) => k.delays.binanceToTv).filter((x) => Number.isFinite(x))));
+    out.push(line('delivery', ks.map((k) => k.delays.tvToCloudflare)));
   }
   const hop = ticks.map((k) => k.delays?.cloudflareToEngine).filter((x) => Number.isFinite(x));
   const pdx = samples.map((s) => s.pd?.ms).filter((x) => Number.isFinite(x));
-  out.push('', head('Inside the bot, ms'));
-  if (hop.length) out.push(line('door → Seoul', hop));
-  if (pdx.length) out.push(line('Seoul ↔ Paradex', pdx));
+  out.push('', head('Bot'));
+  if (hop.length) out.push(line('→ Seoul', hop));
+  if (pdx.length) out.push(line('↔ Paradex', pdx));
   const deliv = ticks.map((k) => k.delays?.tvToCloudflare).filter((x) => Number.isFinite(x));
   if (deliv.length) {
     const lo = Math.min(...deliv);
-    out.push('', lo < 0 ? `Clock check: a delivery arrived ${Math.round(-lo)} ms "before" it was sent: the tool's clock runs ahead.`
-      : `Clock check: fastest delivery ${Math.round(lo)} ms, never negative ✓`);
+    out.push('', lo < 0 ? `Clock ⚠️ a tool's clock runs ${Math.round(-lo)} ms ahead` : `Clock ✓ fastest delivery ${Math.round(lo)} ms`);
   }
   return out.join('\n');
 }
@@ -278,13 +283,13 @@ const pctR = (vals, p) => (vals.length ? [...vals].sort((a, b) => a - b)[rank(va
 const sb = (x) => (x == null || !Number.isFinite(x) ? '-' : (x > 0 ? '+' : x < 0 ? '' : '') + x.toFixed(1));  // signed bp
 const ub = (x) => (x == null || !Number.isFinite(x) ? '-' : x.toFixed(1));                                     // unsigned bp
 const num = (x) => Number(x).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-const row = (label, a, b, c) => `${label.padEnd(17)}${String(a).padStart(7)}${String(b).padStart(7)}${String(c).padStart(7)}`;
+const row = (label, a, b, c) => `${label.padEnd(10)}${String(a).padStart(7)}${String(b).padStart(7)}${String(c).padStart(7)}`;   // 31 wide: fits a phone
 
 export function verdict(gapBps, guard) {
-  if (gapBps == null || !Number.isFinite(gapBps)) return { icon: '⛔', text: 'Paradex mark price unavailable: signals refused' };
-  if (Math.abs(gapBps) > guard) return { icon: '⛔', text: 'Paradex blocked: book too far from the mark' };
-  if (Math.abs(gapBps) > guard / 2) return { icon: '⚠️', text: 'Paradex thin: book drifting from the mark' };
-  return { icon: '✅', text: 'Paradex OK to trade' };
+  if (gapBps == null || !Number.isFinite(gapBps)) return { icon: '⛔', text: 'No mark price: blocked' };
+  if (Math.abs(gapBps) > guard) return { icon: '⛔', text: 'Blocked: book off mark' };
+  if (Math.abs(gapBps) > guard / 2) return { icon: '⚠️', text: 'Thin: book drifting' };
+  return { icon: '✅', text: 'OK to trade' };
 }
 
 // samples: the engine's minute samples ({ t, pd: {bid, ask, ms}, mark }). now: the same shape, taken now.
@@ -296,15 +301,16 @@ export function shortReport({ now, samples, guard, label, status, at = Date.now(
   const gaps = g.map((x) => x.mid), spreads = g.map((x) => x.spread), ms = g.map((x) => x.ms).filter((x) => Number.isFinite(x));
   const over = gaps.filter((x) => Math.abs(x) > guard).length;
   const lines = [`${v.icon} ${v.text} · ${new Date(at).toISOString().slice(11, 16)} UTC`];
-  lines.push(pm ? `Now: ${num(pm)} · ${sb(gNow.mid)} bp vs mark · spread ${ub(gNow.spread)} bp` : 'Now: no Paradex price');
+  if (pm) lines.push(`Now ${num(pm)} · ${sb(gNow.mid)} bp`, `Spread now ${ub(gNow.spread)} bp`);
+  else lines.push('Now: no Paradex price');
   lines.push('');
   if (g.length) {
-    lines.push(row(`${label} (bp)`, 'p50', 'p99', 'max'));
-    lines.push(row('Price vs mark', sb(pctR(gaps, 0.5)), sb(bySize(gaps, 0.99)), sb(bySize(gaps, 1))));
-    lines.push(row('Spread', ub(pctR(spreads, 0.5)), ub(pctR(spreads, 0.99)), ub(Math.max(...spreads))));
-    if (ms.length) lines.push(row('Speed (ms)', Math.round(pctR(ms, 0.5)), Math.round(pctR(ms, 0.99)), Math.round(Math.max(...ms))));
+    lines.push(row(`${label} bp`, 'p50', 'p99', 'max'));
+    lines.push(row('vs mark', sb(pctR(gaps, 0.5)), sb(bySize(gaps, 0.99)), sb(bySize(gaps, 1))));
+    lines.push(row('spread', ub(pctR(spreads, 0.5)), ub(pctR(spreads, 0.99)), ub(Math.max(...spreads))));
+    if (ms.length) lines.push(row('speed ms', Math.round(pctR(ms, 0.5)), Math.round(pctR(ms, 0.99)), Math.round(Math.max(...ms))));
     lines.push('');
-    lines.push(`Guard (${guard} bp): ${over ? `reached in ${over} of ${g.length} minutes` : `never reached in ${g.length} minutes`}`);
+    lines.push(`Guard ${guard} bp: ${over ? `hit ${over} of ${g.length} min` : `never (${g.length} min)`}`);
   } else {
     lines.push(`${label}: no samples yet`);
   }

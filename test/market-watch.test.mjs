@@ -129,15 +129,17 @@ await t('Short report: verdict, signed bp vs mark, p50 / p99 / max, guard, statu
     return { t: i, mark, pd: { bid: m - 5, ask: m + 5, ms: 40 + (i % 10) } };
   });
   const now = { mark: 60000, pd: { bid: 60013, ask: 60023, ms: 41 } };   // mid 60018 = +3.0 bp
-  const txt = shortReport({ now, samples, guard: 50, label: 'Last 24 h', status: 'Position flat · bot paused', at: Date.parse('2026-11-25T11:42:00Z') });
+  const txt = shortReport({ now, samples, guard: 50, label: '24h', status: 'Flat · bot paused', at: Date.parse('2026-11-25T11:42:00Z') });
   const lines = txt.split('\n');
-  assert.equal(lines[0], '✅ Paradex OK to trade · 11:42 UTC');
-  assert.equal(lines[1], 'Now: 60,018.0 · +3.0 bp vs mark · spread 1.7 bp');
-  assert.match(txt, /Price vs mark\s+\+1\.0\s+\+3\.0\s+-40\.0/);    // the worst minute keeps its minus sign
-  assert.match(txt, /Spread\s+1\.7\s+1\.7\s+1\.7/);
-  assert.match(txt, /Speed \(ms\)\s+44\s+49\s+49/);
-  assert.match(txt, /Guard \(50 bp\): never reached in 100 minutes/);
-  assert.equal(lines.at(-1), 'Position flat · bot paused');
+  assert.equal(lines[0], '✅ OK to trade · 11:42 UTC');
+  assert.equal(lines[1], 'Now 60,018.0 · +3.0 bp');
+  assert.equal(lines[2], 'Spread now 1.7 bp');
+  assert.match(txt, /vs mark\s+\+1\.0\s+\+3\.0\s+-40\.0/);    // the worst minute keeps its minus sign
+  assert.match(txt, /spread\s+1\.7\s+1\.7\s+1\.7/);
+  assert.match(txt, /speed ms\s+44\s+49\s+49/);
+  assert.match(txt, /Guard 50 bp: never \(100 min\)/);
+  assert.equal(lines.at(-1), 'Flat · bot paused');
+  assert.ok(lines.every((l) => [...l].length <= 32), 'fits a phone');
 });
 
 await t('Verdict: OK, thin past half the guard, blocked past the guard or without a mark', () => {
@@ -145,7 +147,7 @@ await t('Verdict: OK, thin past half the guard, blocked past the guard or withou
   assert.equal(verdict(-30, 50).icon, '⚠️');
   assert.equal(verdict(51, 50).icon, '⛔');
   assert.equal(verdict(null, 50).icon, '⛔');
-  assert.match(shortReport({ now: { pd: { bid: 1, ask: 2 } }, samples: [], guard: 50, label: 'Last 24 h' }), /mark price unavailable[\s\S]*Last 24 h: no samples yet/);
+  assert.match(shortReport({ now: { pd: { bid: 1, ask: 2 } }, samples: [], guard: 50, label: '24h' }), /No mark price: blocked[\s\S]*24h: no samples yet/);
 });
 
 await t('Latency: end-to-end per tool without its clock; split only when the tool sends a firing time', () => {
@@ -155,14 +157,16 @@ await t('Latency: end-to-end per tool without its clock; split only when the too
   const tv = Array.from({ length: 100 }, (_, i) => ({ t: i, delays: { binanceToTv: 300 + i, tvToCloudflare: 1700 + i, cloudflareToEngine: 70 } }));  // old ticks: no src, no endToEnd
   const tp = Array.from({ length: 100 }, (_, i) => ({ t: i, src: 'takeprofit', delays: { endToEnd: 900 + i, cloudflareToEngine: 72 } }));
   assert.equal(tickSource(tv[0]), 'tradingview');
-  const txt = latencyReport({ ticks: [...tv, ...tp], samples: [{ pd: { ms: 41 } }, { pd: { ms: 43 } }], label: 'last 24 h', at: Date.parse('2026-11-26T12:40:00Z') });
-  assert.match(txt, /^⏱ Latency · last 24 h · 12:40 UTC/);
-  assert.match(txt, /takeprofit\s+100\s+949\s+998\s+999/);
-  assert.match(txt, /tradingview\s+100\s+2098\s+2196\s+2198/);           // derived from trigger + delivery
-  assert.match(txt, /tradingv·trigger\s+100\s+349/);
-  assert.doesNotMatch(txt, /takeprof·trigger/);   // no split for a tool without its own clock
-  assert.match(txt, /Clock check: fastest delivery 1700 ms, never negative/);
-  assert.match(latencyReport({ ticks: [], samples: [], label: 'last 24 h' }), /No charting-tool ticks yet/);
+  const txt = latencyReport({ ticks: [...tv, ...tp], samples: [{ pd: { ms: 41 } }, { pd: { ms: 43 } }], label: '24h', at: Date.parse('2026-11-26T12:40:00Z') });
+  assert.match(txt, /^⏱ Latency 24h · 12:40 UTC/);
+  assert.match(txt, /\nTP\s+949\s+998\s+999/);
+  assert.match(txt, /\nTV\s+2098\s+2196\s+2198/);           // derived from trigger + delivery
+  assert.match(txt, /TV split[\s\S]*trigger\s+349/);
+  assert.match(txt, /minutes: TP 100 · TV 100/);
+  assert.doesNotMatch(txt, /TP split/);   // no split for a tool without its own clock
+  assert.match(txt, /Clock ✓ fastest delivery 1700 ms/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 32), 'fits a phone');
+  assert.match(latencyReport({ ticks: [], samples: [], label: '24h' }), /No charting-tool ticks yet/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
