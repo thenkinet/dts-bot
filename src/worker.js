@@ -4,11 +4,11 @@
 //   GET  /setup      one-time page: links Telegram to this bot (asks for the admin token)
 //   GET  /check      the Paradex check: tiny orders far from the price, cancelled (header x-admin-token required)
 //   POST /alert      relays a TradingView/MMT test alert to Telegram (secret + fresh ts in the body)
-//   POST /tick       a TradingView 1-minute bar-close alert: Binance close + delays, for /spread. Never trades.
+//   POST /tick       a charting tool's 1-minute bar-close alert {src?, bar, ts?, price}: delays per tool, for /latency. Never trades.
 //   POST /signal     Track A: a directional signal {id, side: long|short|flat, price?, size?} for the Engine
 //   GET  /engine     the Engine's state: last report, target, queue (header x-admin-token required)
 //   POST /telegram   Telegram webhook, allowed chat only:
-//                    /status, /check, /spread [7d|full] (Paradex health: price vs mark, spread, speed), /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
+//                    /status, /check, /spread [7d|full] (Paradex health: price vs mark, spread, speed), /latency [7d], /killall (halt + cancel all + verify + re-protect), /flatten (capped reduce-only IOC, needs halt), /resume
 //                    (allowed chat AND allowed sender ids)
 import { DurableObject } from 'cloudflare:workers';
 import { Paradex, BASES } from './paradex-client.js';
@@ -17,7 +17,7 @@ import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
-  TICK_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport } from './market-watch.js';
+  TICK_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport } from './market-watch.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -107,13 +107,20 @@ export class Engine extends DurableObject {
       const k = await request.json();
       const engineAt = Date.now();
       const pd = await takeSample(this.px(), this.env.MARKET, { binance: false }).then((x) => x.pd).catch(() => null);
-      const rec = { t: k.edgeAt, price: k.price, pd, delays: tickDelays({ ...k, engineAt }) };
+      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, delays: tickDelays({ ...k, engineAt }) };
       await st.put(`${TICK_PREFIX}${String(k.edgeAt).padStart(15, '0')}`, rec);
       const stale = [...(await st.list({ prefix: TICK_PREFIX, end: `${TICK_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
       return Response.json({ recorded: true });
     }
     if (url.pathname === '/probe') return Response.json(await probeFromHere());
+    if (url.pathname === '/latency') {
+      const days = url.searchParams.get('range') === '7d' ? 7 : 1;
+      const since = `${String(Date.now() - days * 86_400_000).padStart(15, '0')}`;
+      const ticks = [...(await st.list({ prefix: TICK_PREFIX, start: `${TICK_PREFIX}${since}` })).values()];
+      const samples = [...(await st.list({ prefix: SAMPLE_PREFIX, start: `${SAMPLE_PREFIX}${since}` })).values()];
+      return new Response(latencyReport({ ticks, samples, label: days === 7 ? 'last 7 days' : 'last 24 h' }), { headers: { 'content-type': 'text/plain' } });
+    }
     if (url.pathname === '/market') {
       const days = url.searchParams.get('range') === '7d' ? 7 : 1;
       const text = url.searchParams.get('full') ? await this.marketReport() : await this.shortMarket(days);
@@ -428,6 +435,7 @@ const COMMANDS = [
   { command: 'status', description: 'Position, limits, last signal' },
   { command: 'check', description: 'Check: tiny order far from the price, cancelled' },
   { command: 'spread', description: 'Paradex health: price vs mark, spread, speed (7d, full)' },
+  { command: 'latency', description: 'Bar close to bot, per charting tool (7d)' },
   { command: 'killall', description: 'Halt and cancel every order' },
   { command: 'flatten', description: 'While halted: close positions' },
   { command: 'resume', description: 'Lift the halt' },
@@ -588,17 +596,21 @@ export default {
       return Response.json({ relayed: true });
     }
 
-    // TradingView 1-minute bar-close alert on the Binance chart: measures delays and the price gap.
-    // Same secret as signals, but this route can never trade.
+    // A charting tool's 1-minute bar-close alert on the Binance chart: measures delays and the price gap.
+    // "src" names the tool (each gets its own scoreboard in /latency); "ts", its firing time, is optional:
+    // without it we still get bar close -> Cloudflare, just not the split. Same secret as signals; never trades.
     if (url.pathname === '/tick' && request.method === 'POST') {
       const edgeAt = Date.now();
       const body = await request.json().catch(() => null);
       if (!body || !safeEqual(body.secret, env.SIGNAL_SECRET)) return new Response('forbidden', { status: 403 });
-      const tvAt = toMs(body.ts), barOpen = toMs(body.bar);
-      if (!(Math.abs(edgeAt - tvAt) <= 5 * 60_000)) return new Response('stale or missing ts', { status: 400 });
+      const barOpen = toMs(body.bar), tvAt = body.ts === undefined || body.ts === '' ? NaN : toMs(body.ts);
+      if (!(Math.abs(edgeAt - barOpen) <= 10 * 60_000)) return new Response('stale or missing bar time', { status: 400 });
+      if (Number.isFinite(tvAt) && !(Math.abs(edgeAt - tvAt) <= 5 * 60_000)) return new Response('stale ts', { status: 400 });
       if (!(Number(body.price) > 0)) return new Response('bad price', { status: 400 });
+      const src = String(body.src || 'tradingview').toLowerCase();
+      if (!/^[a-z0-9_-]{1,20}$/.test(src)) return new Response('bad src: 1 to 20 of a-z 0-9 _ -', { status: 400 });
       return engine(env).fetch('https://engine/tick', { method: 'POST', body: JSON.stringify({
-        tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo }) });
+        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo }) });
     }
 
     if (url.pathname === '/signal' && request.method === 'POST') {
@@ -645,7 +657,7 @@ export default {
       try {
         if (cmd === '/start' || cmd === '/help') {
           await setCommands(env);                                  // refreshes the menu after an update
-          await telegram(env, 'Linked. Commands: /status, /check, /spread, /killall, /flatten, /resume.');
+          await telegram(env, 'Linked. Commands: /status, /check, /spread, /latency, /killall, /flatten, /resume.');
         }
         if (cmd === '/check') {
           // A post-only bid 10% below the market cannot fill; it is cancelled at once.
@@ -660,6 +672,12 @@ export default {
           const text = (await (await engine(env).fetch(`https://engine/market${q}`)).text()).slice(0, 3500);
           if (arg === 'full') await telegram(env, text);
           else await telegram(env, `<pre>${esc(text)}</pre>`, env.TELEGRAM_CHAT_ID, 'HTML');   // fixed-width, so the table lines up
+        }
+        if (cmd === '/latency') {
+          // /latency: last 24 h. /latency 7d: last 7 days. One row per charting tool.
+          const arg = ((msg.text || '').trim().split(/\s+/)[1] || '').toLowerCase();
+          const text = (await (await engine(env).fetch(`https://engine/latency${arg === '7d' ? '?range=7d' : ''}`)).text()).slice(0, 3500);
+          await telegram(env, `<pre>${esc(text)}</pre>`, env.TELEGRAM_CHAT_ID, 'HTML');
         }
         if (cmd === '/status') {
           const s = await controlCall(env, '');
