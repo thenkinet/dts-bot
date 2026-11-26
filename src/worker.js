@@ -119,7 +119,7 @@ export class Engine extends DurableObject {
       const since = `${String(Date.now() - days * 86_400_000).padStart(15, '0')}`;
       const ticks = [...(await st.list({ prefix: TICK_PREFIX, start: `${TICK_PREFIX}${since}` })).values()];
       const samples = [...(await st.list({ prefix: SAMPLE_PREFIX, start: `${SAMPLE_PREFIX}${since}` })).values()];
-      return new Response(latencyReport({ ticks, samples, label: days === 7 ? 'last 7 days' : 'last 24 h' }), { headers: { 'content-type': 'text/plain' } });
+      return new Response(latencyReport({ ticks, samples, label: days === 7 ? '7d' : '24h' }), { headers: { 'content-type': 'text/plain' } });
     }
     if (url.pathname === '/market') {
       const days = url.searchParams.get('range') === '7d' ? 7 : 1;
@@ -250,9 +250,9 @@ export class Engine extends DurableObject {
     try {
       const pos = signedPosition(await this.px().positions(), env.MARKET);
       const halted = (await controlCall(env, '')).halted;
-      status = `Position ${pos === 0n ? 'flat' : `${pos > 0n ? 'long' : 'short'} ${fromInt8(pos < 0n ? -pos : pos)}`} · bot ${halted ? 'paused' : 'running'}`;
+      status = `${pos === 0n ? 'Flat' : `${pos > 0n ? 'Long' : 'Short'} ${fromInt8(pos < 0n ? -pos : pos)}`} · bot ${halted ? 'paused' : 'running'}`;
     } catch (e) { status = `Position unknown (${String(e.message || e).slice(0, 80)})`; }
-    return shortReport({ now, samples, guard: Number(env.MAX_MARK_GAP_BPS || 50), label: days === 7 ? 'Last 7 days' : 'Last 24 h', status });
+    return shortReport({ now, samples, guard: Number(env.MAX_MARK_GAP_BPS || 50), label: days === 7 ? '7d' : '24h', status });
   }
 
   // /spread full: where the engine runs, how fast Paradex answers from there, and Binance vs Paradex.
