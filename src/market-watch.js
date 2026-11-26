@@ -96,6 +96,18 @@ const e2e = (k) => k.delays?.endToEnd ?? (Number.isFinite(k.delays?.binanceToTv)
 const TOOL = { tradingview: 'TV', takeprofit: 'TP', mmt: 'MMT' };
 export const toolName = (src) => TOOL[src] || src.slice(0, 8);
 
+// Webhooks that never arrived: one tick is due per 1-minute bar close, from the tool's first tick in
+// the range until 20 s ago (the latest bar may still be on its way). A rejected webhook counts as missed.
+export function delivery(ks, at = Date.now()) {
+  const closes = new Set(ks.map((k) => k.delays?.closeAt).filter((x) => Number.isFinite(x)));
+  if (!closes.size) return null;
+  const first = Math.min(...closes), last = Math.floor((at - 20_000) / 60_000) * 60_000;
+  const missed = [];
+  for (let c = first; c <= last; c += 60_000) if (!closes.has(c)) missed.push(c);
+  const due = last >= first ? Math.round((last - first) / 60_000) + 1 : 0;
+  return { due, got: due - missed.length, missed };
+}
+
 export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   const P = (a, p) => (a.length ? [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.max(0, Math.ceil(p * a.length) - 1))] : null);
   const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
@@ -113,6 +125,17 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
     out.push(line(toolName(n), v)); counts.push(`${toolName(n)} ${v.length}`);
   }
   out.push(`(minutes: ${counts.join(' · ')})`);
+  const dv = names.map((n) => [n, delivery(bySrc[n], at)]).filter(([, d]) => d && d.due);
+  if (dv.length) {
+    out.push('', `${'Webhooks'.padEnd(9)}${'arrived'.padStart(11)}${'up'.padStart(7)}`);
+    for (const [n, d] of dv) {
+      const up = (Math.floor((d.got / d.due) * 1000) / 10).toFixed(1);
+      out.push(`${toolName(n).padEnd(9)}${`${d.got}/${d.due}`.padStart(11)}${`${up}%`.padStart(7)}`);
+    }
+    for (const [n, d] of dv) if (d.missed.length) {
+      out.push(`${toolName(n)} missed ${d.missed.length} · last ${new Date(d.missed.at(-1)).toISOString().slice(11, 16)}`);
+    }
+  }
   for (const n of names.filter((x) => bySrc[x].some((k) => Number.isFinite(k.delays?.tvToCloudflare)))) {
     const ks = bySrc[n].filter((k) => Number.isFinite(k.delays?.tvToCloudflare));
     out.push('', head(`${toolName(n)} split`));
@@ -283,7 +306,7 @@ const pctR = (vals, p) => (vals.length ? [...vals].sort((a, b) => a - b)[rank(va
 const sb = (x) => (x == null || !Number.isFinite(x) ? '-' : (x > 0 ? '+' : x < 0 ? '' : '') + x.toFixed(1));  // signed bp
 const ub = (x) => (x == null || !Number.isFinite(x) ? '-' : x.toFixed(1));                                     // unsigned bp
 const num = (x) => Number(x).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-const row = (label, a, b, c) => `${label.padEnd(10)}${String(a).padStart(7)}${String(b).padStart(7)}${String(c).padStart(7)}`;   // 31 wide: fits a phone
+const row = (label, a, b, c) => `${label.padEnd(9)}${String(a).padStart(6)}${String(b).padStart(6)}${String(c).padStart(6)}`;   // 27 wide, like /latency: fits a phone
 
 export function verdict(gapBps, guard) {
   if (gapBps == null || !Number.isFinite(gapBps)) return { icon: '⛔', text: 'No mark price: blocked' };
