@@ -102,6 +102,15 @@ export function fromToolPayload(body) {
 // ---- /latency: one scoreboard per charting tool ----
 // Ticks recorded before source tags existed came from TradingView.
 export const tickSource = (k) => k.src || 'tradingview';
+// A real bar-close tick: its bar is on a whole minute, it arrives after the close, and a tool that
+// sends its firing time fired within 30 s of the close. Anything else is a test or a timer alert
+// (MMT's "Send test", a "repeat every 60 s" timer), kept out of the figures.
+export const isBarClose = (k) => {
+  const c = k.delays?.closeAt, a = e2e(k), f = k.delays?.binanceToTv;
+  if (Number.isFinite(c) && c % 60_000 !== 0) return false;
+  if (Number.isFinite(a) && a < 0) return false;
+  return !(Number.isFinite(f) && (f < -2000 || f > 30_000));
+};
 const e2e = (k) => k.delays?.endToEnd ?? (Number.isFinite(k.delays?.binanceToTv) && Number.isFinite(k.delays?.tvToCloudflare)
   ? k.delays.binanceToTv + k.delays.tvToCloudflare : null);
 
@@ -132,7 +141,8 @@ export function delivery(ks, at = Date.now()) {
   return { due: all - offN, got: all - offN - missed.length, missed, off, offNow: Boolean(off.length && off.at(-1).to === last) };
 }
 
-export function latencyReport({ ticks, samples, orders = [], label, at = Date.now() }) {
+export function latencyReport({ ticks: all, samples, orders = [], label, at = Date.now() }) {
+  const ticks = all.filter(isBarClose);
   const P = (a, p) => (a.length ? [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.max(0, Math.ceil(p * a.length) - 1))] : null);
   const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
   const line = (name, vals) => `${name.padEnd(9).slice(0, 9)}${ms(P(vals, 0.5)).padStart(6)}${ms(P(vals, 0.99)).padStart(6)}${ms(vals.length ? Math.max(...vals) : null).padStart(6)}`;
@@ -264,13 +274,13 @@ export const cloudName = (org) => {
   if (!org) return null;
   const o = String(org).toLowerCase();
   if (o.includes('amazon')) return 'AWS';
-  if (o.includes('google')) return 'Google';
-  if (o.includes('microsoft')) return 'Azure';
-  if (o.includes('cloudflare')) return 'Cloudflare';
-  if (o.includes('hetzner')) return 'Hetzner';
+  if (o.includes('google')) return 'GCP';
+  if (o.includes('microsoft')) return 'AZR';
+  if (o.includes('cloudflare')) return 'CF';
+  if (o.includes('hetzner')) return 'HTZ';
   if (o.includes('ovh')) return 'OVH';
-  if (o.includes('digitalocean')) return 'DigitalOcean';
-  return String(org).split(/[\s,]/)[0].slice(0, 12);
+  if (o.includes('digitalocean')) return 'DO';
+  return String(org).split(/[\s,]/)[0].slice(0, 6);
 };
 
 export function moduleSplit(k, floor) {
@@ -283,7 +293,8 @@ export function moduleSplit(k, floor) {
   return { cfProc: pause + other, cfDel: k.delays?.cloudflareToEngine, pxProc: pSum - pDel, pxDel: pDel };
 }
 
-export function moduleReport({ ticks, tg = [], label, at = Date.now() }) {
+export function moduleReport({ ticks: all, tg = [], label, at = Date.now() }) {
+  const ticks = all.filter(isBarClose);
   const out = [`⏱ Latency ${label} · ${new Date(at).toISOString().slice(11, 16)} UTC`, ''];
   const bySrc = {};
   for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
@@ -296,74 +307,71 @@ export function moduleReport({ ticks, tg = [], label, at = Date.now() }) {
   const full = withSteps.filter((k) => split(k) && Number.isFinite(e2e(k)));   // complete minutes only
   const done = {};
   for (const k of full) (done[tickSource(k)] ||= []).push(k);
-  // Headline per tool: bar close -> Paradex acknowledges, measured whole each minute.
-  out.push('Bar close → order ack');
+  const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
+  const s2 = (x) => (x == null ? '-' : (x / 1000).toFixed(2));
+  const hm = (t) => new Date(t).toISOString().slice(11, 16);
+  // 1. Headline per tool: bar close -> Paradex acknowledges, measured whole each minute, and uptime.
+  out.push('Close → order ack (s)', `${'Tool'.padEnd(4)}${'p50'.padStart(7)}${'p99'.padStart(7)}${'up'.padStart(7)}`);
+  const warn = [];
   for (const n of names) {
     const ks = done[n] || [];
     const tot = ks.map((k) => { const m = split(k); return e2e(k) + m.cfDel + m.cfProc + m.pxProc + m.pxDel; });
-    out.push(ks.length ? `${toolName(n).padEnd(4)}${sec(p50(tot)).padStart(7)} · p99 ${sec(p99(tot))}` : `${toolName(n).padEnd(4)} measuring…`);
+    const d = delivery(bySrc[n], at);
+    const r = d && d.due ? Math.floor((d.got / d.due) * 1000) / 10 : null;
+    const up = r == null ? '-' : r === 100 ? '100%' : `${r.toFixed(1)}%`;
+    out.push(`${toolName(n).padEnd(4)}${(ks.length ? s2(p50(tot)) : '…').padStart(7)}${(ks.length ? s2(p99(tot)) : '').padStart(7)}${up.padStart(7)}`);
+    if (d?.offNow) warn.push(`⚠️ ${toolName(n)} off since ${hm(d.off.at(-1).from)}`);
   }
-  const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
+  out.push(...warn);
+  // 2. Race on the same bar closes: each tool against TradingView (or the tool with most minutes).
+  // Only the tool's own part (bar close -> Cloudflare's door) differs between tools: that is compared.
+  const most = names.filter((n) => done[n]).sort((a, b) => done[b].length - done[a].length)[0];
+  const ref = done.tradingview ? 'tradingview' : most;
+  const atClose = (n) => new Map((done[n] || []).filter((k) => Number.isFinite(k.delays?.closeAt)).map((k) => [k.delays.closeAt, e2e(k)]));
+  const refMap = ref ? atClose(ref) : new Map();
+  const race = [];
+  for (const n of names.filter((x) => x !== ref && done[x])) {
+    const gaps = [...atClose(n)].filter(([c]) => refMap.has(c)).map(([c, v]) => refMap.get(c) - v);   // > 0: this tool first
+    if (!gaps.length) continue;
+    const lead = Math.round(p50(gaps));
+    race.push(`${toolName(n).padEnd(4)}${`${gaps.filter((g) => g > 0).length}/${gaps.length}`.padStart(10)}${`${lead > 0 ? '+' : ''}${lead}`.padStart(10)}`);
+  }
+  if (race.length) out.push('', `Race vs ${toolName(ref)} · same bars`, 'lead ms: + faster, - slower', `${'Tool'.padEnd(4)}${'won'.padStart(10)}${'lead'.padStart(10)}`, ...race);
+  // 3. Modules: processing vs delivery. Tool rows include Binance's feed (they cannot be told apart).
   const row = (l, a, b) => `${l.padEnd(11)}${ms(a).padStart(7)}${ms(b).padStart(7)}`;
-  out.push('', `${'Module (ms)'.padEnd(11)}${'proc'.padStart(7)}${'deliv'.padStart(7)}`);
-  // The total row is for the first tool with a complete minute (its tool row + Cloudflare + Paradex).
-  const main = names.find((n) => done[n]) || names[0];
+  out.push('', `${'Module ms'.padEnd(11)}${'proc'.padStart(7)}${'deliv'.padStart(7)}`);
+  const main = done.tradingview ? 'tradingview' : most || names[0];   // the total row follows one tool
   let tp = 0, td = 0;
   for (const n of names) {
     const ks = done[n] || [];
     const hasTs = ks.some((k) => Number.isFinite(k.delays?.tvToCloudflare));
     const a = hasTs ? p50(ks.map((k) => k.delays?.binanceToTv)) : null;
     const b = hasTs ? p50(ks.map((k) => k.delays?.tvToCloudflare)) : p50(ks.map(e2e));
-    out.push(row(`Binance+${toolName(n)}`.slice(0, 11), a, b));
+    out.push(row(`${toolName(n)}*`, a, b));
     if (n === main) { tp += a || 0; td += b || 0; }
   }
   const ms2 = full.map(split);
   if (ms2.length) {
     const cfP = p50(ms2.map((m) => m.cfProc)), cfD = p50(ms2.map((m) => m.cfDel));
     const pxP = p50(ms2.map((m) => m.pxProc)), pxD = p50(ms2.map((m) => m.pxDel));
-    out.push(row('Cloudflare', cfP, cfD), row('Paradex', pxP, pxD));
+    out.push(row('CF', cfP, cfD), row('Paradex', pxP, pxD));
     tp += cfP + pxP; td += cfD + pxD;
-    out.push(row(`= ${toolName(main)} total`, tp, td));
-  } else out.push('Cloudflare, Paradex: measuring…');
-  // Race on the same bar closes: each other tool against TradingView (or the first tool). Only the
-  // tool's own part (bar close -> Cloudflare's door) differs between tools, so that is what is compared.
-  const ref = done.tradingview ? 'tradingview' : names.find((n) => done[n]);
-  const atClose = (n) => new Map((done[n] || []).filter((k) => Number.isFinite(k.delays?.closeAt)).map((k) => [k.delays.closeAt, e2e(k)]));
-  const refMap = ref ? atClose(ref) : new Map();
-  for (const n of names.filter((x) => x !== ref && done[x])) {
-    const gaps = [...atClose(n)].filter(([c]) => refMap.has(c)).map(([c, v]) => refMap.get(c) - v);   // > 0: this tool first
-    if (!gaps.length) continue;
-    const t = toolName(n), r = toolName(ref), lead = p50(gaps);
-    out.push('', 'Race: same bar closes', `${`${t} vs ${r}`.padEnd(15)}${`${gaps.length} min`.padStart(12)}`,
-      `${`${t} first`.padEnd(15)}${`${gaps.filter((g) => g > 0).length}/${gaps.length}`.padStart(12)}`,
-      `${`${t} lead p50`.padEnd(15)}${`${lead > 0 ? '+' : ''}${ms(lead)} ms`.padStart(12)}`);
-  }
-  // Side paths: Telegram, not part of the order path.
-  const inMs = tg.map((x) => x.inMs), sendMs = tg.map((x) => x.sendMs);
-  if (tg.length) {
-    out.push('', 'Side path: Telegram (ms)');
-    if (p50(inMs) != null) out.push(`${'command in'.padEnd(16)}${`~${ms(p50(inMs))}`.padStart(7)}`);   // ~: Telegram stamps to the second
-    if (p50(sendMs) != null) out.push(`${'bot answers'.padEnd(16)}${ms(p50(sendMs)).padStart(7)}`);
-  }
-  // Where each tool's webhooks come from: cloud provider and city (Cloudflare's lookup of the sender's
-  // address), and the Cloudflare door that received them. Information only.
+    out.push(row(`= ${toolName(main)}`, tp, td));
+  } else out.push('CF, Paradex: measuring…');
+  out.push('* incl. Binance feed');
+  // 4. Side path: Telegram, not part of the order path (in: Telegram stamps to the second, hence ~).
+  const inMs = p50(tg.map((x) => x.inMs)), sendMs = p50(tg.map((x) => x.sendMs));
+  if (inMs != null || sendMs != null) out.push('', `TG ms: in ~${ms(inMs)} · out ${ms(sendMs)}`);
+  // 5. Where each tool's webhooks come from: cloud, city, country (Cloudflare's lookup). Information only.
   const from = names.map((n) => [n, bySrc[n].findLast((k) => k.from?.org || k.from?.city)?.from]).filter(([, f]) => f);
   if (from.length) {
-    out.push('', 'Sent from');
-    for (const [n, f] of from) out.push(`${toolName(n).padEnd(4)}${[cloudName(f.org), f.city, f.country].filter(Boolean).join(' · ')}`.slice(0, 27));
-  }
-  const up = names.map((n) => { const d = delivery(bySrc[n], at); return d && d.due ? `${toolName(n)} ${(Math.floor((d.got / d.due) * 1000) / 10).toFixed(1)}%` : null; }).filter(Boolean);
-  if (up.length) {
-    // "Up: TP 100.0% · TV 100.0%", wrapped so no line passes 27 characters (3 or more tools).
-    const lines = [];
-    for (const u of up) {
-      const last = lines.at(-1);
-      if (last && [...`${last} · ${u}`].length <= 27) lines[lines.length - 1] = `${last} · ${u}`;
-      else lines.push(lines.length ? `    ${u}` : `Up: ${u}`);
+    out.push('', 'From');
+    for (const [n, f] of from) {
+      const head = `${toolName(n).padEnd(4)}${cloudName(f.org) || '?'} `, cc = f.country ? ` ${f.country}` : '';
+      out.push(`${head}${String(f.city || '').slice(0, Math.max(0, 27 - head.length - cc.length))}${cc}`.trimEnd());
     }
-    out.push('', ...lines);
   }
-  out.push(`(p50 · ${full.length} min)`, 'More: /latency full');
+  out.push('', `${full.length} min · /latency full`);
   return out.join('\n');
 }
 
@@ -371,7 +379,7 @@ const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y)
 
 // Summary of /tick samples: gap Paradex mid vs Binance close, and each delay (median and slowest 10%).
 export function summariseTicks(ticks) {
-  const ok = ticks.filter((k) => k.price > 0 && k.pd && mid(k.pd.bid, k.pd.ask));
+  const ok = ticks.filter((k) => k.price > 0 && tickSource(k) === 'tradingview' && k.pd && mid(k.pd.bid, k.pd.ask));   // TV's Binance close only (MMT may send a placeholder)
   const gaps = ok.map((k) => bps(mid(k.pd.bid, k.pd.ask), k.price));
   const d = (key) => ticks.map((k) => k.delays?.[key]).filter((x) => Number.isFinite(x));
   const both = (key) => ({ med: median(d(key)), p90: pct(d(key), 0.9) });
