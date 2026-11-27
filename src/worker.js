@@ -109,7 +109,7 @@ export class Engine extends DurableObject {
       const engineAt = Date.now();
       const dry = await this.dryRun().catch((e) => ({ stopped: String(e.message || e).slice(0, 120) }));   // the order path, timed
       const pd = await takeSample(this.px(), this.env.MARKET, { binance: false }).then((x) => x.pd).catch(() => null);
-      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, dry, delays: tickDelays({ ...k, engineAt }) };
+      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, dry, from: k.from, delays: tickDelays({ ...k, engineAt }) };
       await st.put(`${TICK_PREFIX}${String(k.edgeAt).padStart(15, '0')}`, rec);
       const stale = [...(await st.list({ prefix: TICK_PREFIX, end: `${TICK_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
@@ -669,7 +669,9 @@ export default {
       const src = String(body.src || 'tradingview').toLowerCase();
       if (!/^[a-z0-9_-]{1,20}$/.test(src)) return new Response('bad src: 1 to 20 of a-z 0-9 _ -', { status: 400 });
       return engine(env).fetch('https://engine/tick', { method: 'POST', body: JSON.stringify({
-        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo }) });
+        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo,
+        // where the tool's webhook comes from (Cloudflare's own lookup of the sender's address): information only
+        from: { org: request.cf?.asOrganization, city: request.cf?.city, country: request.cf?.country, colo: request.cf?.colo } }) });
     }
 
     if (url.pathname === '/signal' && request.method === 'POST') {
