@@ -88,6 +88,17 @@ export function tickDelays({ barOpen, interval, tvAt, edgeAt, engineAt }) {
   };
 }
 
+// A charting tool that sends its own fixed JSON instead of our message is translated here into the
+// usual tick fields { src, bar, ts, tf, price }. Returns null for anything it does not recognise.
+//   OpenMarket: { type: "alert.fired", barTs: <bar open, ms>, firedAt: <ISO, ms>, interval: "1m", value: <price> }.
+//   Its firing time has milliseconds, so OpenMarket gets the trigger/delivery split, like TradingView.
+export function fromToolPayload(body) {
+  if (body && body.type === 'alert.fired' && Number(body.barTs) > 0) {
+    return { src: 'openmarket', bar: Number(body.barTs), ts: body.firedAt, tf: String(parseInt(body.interval, 10) || 1), price: body.value };
+  }
+  return null;
+}
+
 // ---- /latency: one scoreboard per charting tool ----
 // Ticks recorded before source tags existed came from TradingView.
 export const tickSource = (k) => k.src || 'tradingview';
@@ -95,7 +106,7 @@ const e2e = (k) => k.delays?.endToEnd ?? (Number.isFinite(k.delays?.binanceToTv)
   ? k.delays.binanceToTv + k.delays.tvToCloudflare : null);
 
 // Short names keep the table within a phone's width (about 30 characters of fixed-width text).
-const TOOL = { tradingview: 'TV', takeprofit: 'TP', mmt: 'MMT' };
+const TOOL = { tradingview: 'TV', takeprofit: 'TP', mmt: 'MMT', openmarket: 'OM' };
 export const toolName = (src) => TOOL[src] || src.slice(0, 8);
 
 // Webhooks that never arrived: one tick is due per 1-minute bar close, from the tool's first tick in
@@ -248,6 +259,19 @@ export function latencyReport({ ticks, samples, orders = [], label, at = Date.no
 const p50 = (a) => { const v = a.filter((x) => Number.isFinite(x)).sort((x, y) => x - y); return v.length ? v[Math.max(0, Math.ceil(0.5 * v.length) - 1)] : null; };
 const p99 = (a) => { const v = a.filter((x) => Number.isFinite(x)).sort((x, y) => x - y); return v.length ? v[Math.max(0, Math.ceil(0.99 * v.length) - 1)] : null; };
 const sec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(2)} s`);
+// Short cloud names for the senders' networks ("Amazon.com, Inc." -> AWS); anything else: its first word.
+export const cloudName = (org) => {
+  if (!org) return null;
+  const o = String(org).toLowerCase();
+  if (o.includes('amazon')) return 'AWS';
+  if (o.includes('google')) return 'Google';
+  if (o.includes('microsoft')) return 'Azure';
+  if (o.includes('cloudflare')) return 'Cloudflare';
+  if (o.includes('hetzner')) return 'Hetzner';
+  if (o.includes('ovh')) return 'OVH';
+  if (o.includes('digitalocean')) return 'DigitalOcean';
+  return String(org).split(/[\s,]/)[0].slice(0, 12);
+};
 
 export function moduleSplit(k, floor) {
   const steps = k.dry?.steps;
@@ -321,8 +345,24 @@ export function moduleReport({ ticks, tg = [], label, at = Date.now() }) {
     if (p50(inMs) != null) out.push(`${'command in'.padEnd(16)}${`~${ms(p50(inMs))}`.padStart(7)}`);   // ~: Telegram stamps to the second
     if (p50(sendMs) != null) out.push(`${'bot answers'.padEnd(16)}${ms(p50(sendMs)).padStart(7)}`);
   }
+  // Where each tool's webhooks come from: cloud provider and city (Cloudflare's lookup of the sender's
+  // address), and the Cloudflare door that received them. Information only.
+  const from = names.map((n) => [n, bySrc[n].findLast((k) => k.from?.org || k.from?.city)?.from]).filter(([, f]) => f);
+  if (from.length) {
+    out.push('', 'Sent from');
+    for (const [n, f] of from) out.push(`${toolName(n).padEnd(4)}${[cloudName(f.org), f.city, f.country].filter(Boolean).join(' · ')}`.slice(0, 27));
+  }
   const up = names.map((n) => { const d = delivery(bySrc[n], at); return d && d.due ? `${toolName(n)} ${(Math.floor((d.got / d.due) * 1000) / 10).toFixed(1)}%` : null; }).filter(Boolean);
-  if (up.length) out.push('', `Up: ${up.join(' · ')}`);
+  if (up.length) {
+    // "Up: TP 100.0% · TV 100.0%", wrapped so no line passes 27 characters (3 or more tools).
+    const lines = [];
+    for (const u of up) {
+      const last = lines.at(-1);
+      if (last && [...`${last} · ${u}`].length <= 27) lines[lines.length - 1] = `${last} · ${u}`;
+      else lines.push(lines.length ? `    ${u}` : `Up: ${u}`);
+    }
+    out.push('', ...lines);
+  }
   out.push(`(p50 · ${full.length} min)`, 'More: /latency full');
   return out.join('\n');
 }
