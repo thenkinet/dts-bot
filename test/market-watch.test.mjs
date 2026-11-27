@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource, delivery, moduleReport, moduleSplit } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource, delivery, moduleReport, moduleSplit, fromToolPayload, cloudName } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -234,6 +234,28 @@ await t('Same minutes everywhere, and a race on the bar closes both tools delive
   assert.match(txt, /Binance\+TP\s+-\s+1500/);
   assert.match(txt, /Race: same bar closes\nTP vs TV\s+10 min\nTP first\s+9\/10\nTP lead p50\s+\+500 ms/);
   assert.match(txt, /\(p50 · 20 min\)/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
+});
+
+await t('OpenMarket payload translated into a tick; anything else left alone', () => {
+  const om = { type: 'alert.fired', alertId: 'x', name: 'BTCUSDT price level', symbol: 'BTCUSDT', exchange: 'BINANCE_FUTURES', interval: '1m',
+    message: 'Price is above 1 (at 61748.2)', note: '', value: 61748.2, barTs: 1795779780000, firedAt: '2026-11-27T11:44:00.624Z', source: 'rule', kind: 'price' };
+  assert.deepEqual(fromToolPayload(om), { src: 'openmarket', bar: 1795779780000, ts: '2026-11-27T11:44:00.624Z', tf: '1', price: 61748.2 });
+  const d = tickDelays({ barOpen: 1795779780000, interval: '1', tvAt: Date.parse(om.firedAt), edgeAt: Date.parse('2026-11-27T11:44:01.100Z'), engineAt: Date.parse('2026-11-27T11:44:01.170Z') });
+  assert.equal(d.binanceToTv, 624); assert.equal(d.tvToCloudflare, 476);      // bar 11:43 closes 11:44:00.000, fired .624, arrived 1.100
+  assert.equal(fromToolPayload({ secret: 's', src: 'tradingview', bar: '1', price: '1' }), null);
+  assert.equal(fromToolPayload(null), null);
+});
+
+await t('Sent from: cloud provider and city of each tool, from its latest webhook', () => {
+  assert.equal(cloudName('Amazon.com, Inc.'), 'AWS'); assert.equal(cloudName('Google LLC'), 'Google'); assert.equal(cloudName(undefined), null);
+  const c0 = Date.parse('2026-11-27T12:00:00Z');
+  const steps = [['market', 40], ['pause', 250]];
+  const tick = (src, from) => ({ t: c0, src, dry: { checks: 300, ack: 40, steps }, from, delays: { closeAt: c0, endToEnd: 1000, cloudflareToEngine: 70 } });
+  const txt = moduleReport({ ticks: [tick('openmarket', { org: 'Amazon.com, Inc.', city: 'Singapore', country: 'SG', colo: 'SIN' }),
+    tick('tradingview', { org: 'Amazon.com, Inc.', city: 'Ashburn', country: 'US', colo: 'IAD' }), tick('takeprofit', undefined)], label: '24h', at: c0 + 30_000 });
+  assert.match(txt, /Sent from\nOM  AWS · Singapore · SG\nTV  AWS · Ashburn · US\n/);
+  assert.doesNotMatch(txt, /TP  AWS/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
