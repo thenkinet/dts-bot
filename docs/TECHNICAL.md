@@ -162,7 +162,7 @@ Safety rules of the Engine (Quant 2's review of v3):
 
 | Variable (`wrangler.toml`) | Meaning |
 |---|---|
-| `EXEC_MODE` | `taker` (first): IOC at the cap, with a Retail token (`PARADEX_INTERACTIVE = "true"`): zero fees, RPI liquidity. `maker`: post-only at the touch, re-posted, then IOC fallback |
+| `EXEC_MODE` | `taker` (first): IOC at the cap. Orders are Pro (`PARADEX_INTERACTIVE = "false"`): no 300 ms speed bump, Pro fees; `"true"` = Retail token: zero fees, RPI liquidity, 300 ms bump and tight rate limits. `maker`: post-only at the touch, re-posted, then IOC fallback |
 | `ORDER_SIZE` | Position size per signal |
 | `MAX_SLIPPAGE_BPS` | Cap around the reference price: no buy above, no sell below |
 | `TAKER_ATTEMPTS` | IOC attempts per leg |
