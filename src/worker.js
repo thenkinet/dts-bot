@@ -17,7 +17,7 @@ import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
-  TICK_PREFIX, ORDER_PREFIX, TG_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport, moduleReport } from './market-watch.js';
+  TICK_PREFIX, ORDER_PREFIX, TG_PREFIX, fromToolPayload, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport, moduleReport } from './market-watch.js';
 import { VERSION } from './version.js';
 
 // ---------- small helpers ----------
@@ -109,7 +109,7 @@ export class Engine extends DurableObject {
       const engineAt = Date.now();
       const dry = await this.dryRun().catch((e) => ({ stopped: String(e.message || e).slice(0, 120) }));   // the order path, timed
       const pd = await takeSample(this.px(), this.env.MARKET, { binance: false }).then((x) => x.pd).catch(() => null);
-      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, dry, delays: tickDelays({ ...k, engineAt }) };
+      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, dry, from: k.from, delays: tickDelays({ ...k, engineAt }) };
       await st.put(`${TICK_PREFIX}${String(k.edgeAt).padStart(15, '0')}`, rec);
       const stale = [...(await st.list({ prefix: TICK_PREFIX, end: `${TICK_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
@@ -502,7 +502,7 @@ const telegramLinked = (env) => Boolean(env.TELEGRAM_CHAT_ID) && allowedUsers(en
 
 // Secrets the bot needs, by name. /health reports which are set, never their values.
 export const SECRET_NAMES = ['PARADEX_ACCOUNT', 'PARADEX_PRIVATE_KEY', 'TELEGRAM_BOT_TOKEN', 'SIGNAL_SECRET', 'ADMIN_TOKEN'];
-const OPTIONAL_SECRETS = ['PARADEX_KILL_PRIVATE_KEY', 'ALERT_SECRET'];
+const OPTIONAL_SECRETS = ['PARADEX_KILL_PRIVATE_KEY', 'ALERT_SECRET', 'TICK_SECRET'];
 const looksSet = (v) => typeof v === 'string' && v.trim().length > 0 && !/^(later|todo|x|-)$/i.test(v.trim());
 
 const page = (title, body) => new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
@@ -653,10 +653,15 @@ export default {
     // A charting tool's 1-minute bar-close alert on the Binance chart: measures delays and the price gap.
     // "src" names the tool (each gets its own scoreboard in /latency); "ts", its firing time, is optional:
     // without it we still get bar close -> Cloudflare, just not the split. Same secret as signals; never trades.
+    // A tool that cannot put a secret in its message (OpenMarket sends its own fixed JSON) proves itself
+    // with ?key=TICK_SECRET in the URL instead. That secret opens /tick only: it can never trade.
     if (url.pathname === '/tick' && request.method === 'POST') {
       const edgeAt = Date.now();
-      const body = await request.json().catch(() => null);
-      if (!body || !safeEqual(body.secret, env.SIGNAL_SECRET)) return new Response('forbidden', { status: 403 });
+      const raw = await request.json().catch(() => null);
+      const tool = fromToolPayload(raw);
+      const body = tool || raw;
+      const allowed = (raw && safeEqual(raw.secret, env.SIGNAL_SECRET)) || safeEqual(url.searchParams.get('key'), env.TICK_SECRET);
+      if (!body || !allowed) return new Response('forbidden', { status: 403 });
       const barOpen = toMs(body.bar), tvAt = body.ts === undefined || body.ts === '' ? NaN : toMs(body.ts);
       if (!(Math.abs(edgeAt - barOpen) <= 10 * 60_000)) return new Response('stale or missing bar time', { status: 400 });
       if (Number.isFinite(tvAt) && !(Math.abs(edgeAt - tvAt) <= 5 * 60_000)) return new Response('stale ts', { status: 400 });
@@ -664,7 +669,9 @@ export default {
       const src = String(body.src || 'tradingview').toLowerCase();
       if (!/^[a-z0-9_-]{1,20}$/.test(src)) return new Response('bad src: 1 to 20 of a-z 0-9 _ -', { status: 400 });
       return engine(env).fetch('https://engine/tick', { method: 'POST', body: JSON.stringify({
-        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo }) });
+        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo,
+        // where the tool's webhook comes from (Cloudflare's own lookup of the sender's address): information only
+        from: { org: request.cf?.asOrganization, city: request.cf?.city, country: request.cf?.country, colo: request.cf?.colo } }) });
     }
 
     if (url.pathname === '/signal' && request.method === 'POST') {
