@@ -212,11 +212,28 @@ await t('By module: processing and delivery per module, adding up to the headlin
   ks.push({ t: c0 + 30 * 60_000, src: 'takeprofit', pd: { ms: 40 }, delays: { closeAt: c0 + 30 * 60_000, endToEnd: 950, cloudflareToEngine: 72 } });
   const txt = moduleReport({ ticks: ks, tg: [{ inMs: 820, sendMs: 140 }], label: '24h', at: c0 + 30 * 60_000 + 30_000 });
   assert.match(txt, /Bar close → order ack\nTP\s+measuring…\nTV\s+1\.89 s · p99 1\.89 s/);   // 327 + 884 + 70 + 301 + 41 + 266
-  assert.match(txt, /Module \(ms\)\s+proc\s+deliv\nBinance\+TP\s+-\s+950\nBinance\+TV\s+327\s+884\nCloudflare\s+301\s+70\nParadex\s+41\s+266/);
+  assert.match(txt, /Module \(ms\)\s+proc\s+deliv\nBinance\+TP\s+-\s+-\nBinance\+TV\s+327\s+884\nCloudflare\s+301\s+70\nParadex\s+41\s+266/);
   assert.match(txt, /command in\s+~820\nbot answers\s+140/);
   assert.match(txt, /Paradex\s+41\s+266\n= TV total\s+669\s+1220/);   // proc 327+301+41, deliv 884+70+266
   assert.match(txt, /Up: TP 100\.0% · TV 100\.0%/);
   assert.match(txt, /More: \/latency full/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
+});
+
+await t('Same minutes everywhere, and a race on the bar closes both tools delivered', () => {
+  const c0 = Date.parse('2026-11-27T10:00:00Z');
+  const steps = [['market', 40], ['position', 40], ['book', 40], ['mark', 40], ['book', 40], ['pause', 250], ['account', 40]];
+  const dry = { checks: 500, ack: 40, via: 'rest', steps };
+  // TradingView: 1000 minutes of old data without a dry run (fast nights), then 10 slow minutes with it.
+  const old = Array.from({ length: 1000 }, (_, i) => ({ t: c0 - (1000 - i) * 60_000, pd: { ms: 40 }, delays: { closeAt: c0 - (1000 - i) * 60_000, binanceToTv: 300, tvToCloudflare: 900, cloudflareToEngine: 70 } }));
+  const tv = Array.from({ length: 10 }, (_, i) => ({ t: c0 + i * 60_000, pd: { ms: 40 }, dry, delays: { closeAt: c0 + i * 60_000, binanceToTv: 300, tvToCloudflare: 1700, cloudflareToEngine: 70 } }));
+  // TakeProfit: the same 10 bar closes, 1500 ms to the door, except one minute at 2100.
+  const tp = Array.from({ length: 10 }, (_, i) => ({ t: c0 + i * 60_000 + 1, src: 'takeprofit', pd: { ms: 40 }, dry, delays: { closeAt: c0 + i * 60_000, endToEnd: i === 3 ? 2100 : 1500, cloudflareToEngine: 70 } }));
+  const txt = moduleReport({ ticks: [...old, ...tv, ...tp], label: '24h', at: c0 + 10 * 60_000 + 30_000 });
+  assert.match(txt, /Binance\+TV\s+300\s+1700/);           // the same 10 minutes as the headline, not the 1000 old ones
+  assert.match(txt, /Binance\+TP\s+-\s+1500/);
+  assert.match(txt, /Race: same bar closes\nTP vs TV\s+10 min\nTP first\s+9\/10\nTP lead p50\s+\+500 ms/);
+  assert.match(txt, /\(p50 · 20 min\)/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
