@@ -197,6 +197,25 @@ export function latencyReport({ ticks, samples, orders = [], label, at = Date.no
   if (pdx.length) out.push(line('↔ Paradex', pdx));
   const stopped = ticks.filter((k) => k.dry?.stopped).length;
   if (stopped) out.push(`(dry run stopped early: ${stopped})`);
+  // The checks, step by step, in the order the bot runs them. A step that runs twice (the book) is
+  // numbered; "other" is the time between steps (the bot's own work, storage).
+  const stepped = dry.filter((k) => Array.isArray(k.dry.steps) && k.dry.steps.length);
+  if (stepped.length) {
+    const order = [], byLabel = {};
+    for (const k of stepped) {
+      const seen = {};
+      let sum = 0;
+      for (const [l, v] of k.dry.steps) {
+        seen[l] = (seen[l] || 0) + 1;
+        const key = seen[l] > 1 ? `${l} ${seen[l]}` : l;
+        if (!byLabel[key]) { byLabel[key] = []; order.push(key); }
+        byLabel[key].push(v); sum += v;
+      }
+      (byLabel.other ||= []).push(Math.max(0, k.dry.checks - sum));
+    }
+    out.push('', `Checks by step (${stepped.length})`, head(''));
+    for (const key of [...order, 'other']) out.push(line(key, byLabel[key]));
+  }
   // Real orders: the same legs, measured on the real thing.
   const od = orders.filter((o) => Number.isFinite(o.start));
   if (od.length) {
