@@ -247,22 +247,35 @@ export class Engine extends DurableObject {
   // same guard), stopped where the order would leave. Then one signed Paradex request, the closest
   // stand-in for an order's acknowledgement. Two locks keep it read-only: the executor stops before
   // placeOrder in dry-run mode, and the client it is given refuses any order or cancel.
+  // Each step is timed on its own (steps, in order), so /latency shows where the checks' time goes.
   async dryRun() {
     const real = this.px();
+    const steps = [];
+    const timed = async (label, fn) => { const a = Date.now(); try { return await fn(); } finally { steps.push([label, Date.now() - a]); } };
+    const LABEL = { market: 'market', positions: 'position', bestPrices: 'book', marketSummary: 'mark' };
     const readOnly = new Proxy(real, {
       get(t, k) {
         const v = t[k];
         if (['placeOrder', 'cancelOrder', 'cancelAll'].includes(k)) return async () => { throw new Error('dry run: orders are blocked'); };
-        return typeof v === 'function' ? v.bind(t) : v;
+        if (typeof v !== 'function') return v;
+        return (...a) => timed(LABEL[k] || String(k).slice(0, 9), () => v.apply(t, a));
       },
     });
+    // The guard's two parts, timed apart: the pause flag (Control object) and the account value (daily
+    // loss). Both are always read here, as when the bot runs; the real guard skips the second while paused.
+    const guard = async () => {
+      await timed('pause', () => controlCall(this.env, ''));
+      if (Number(this.env.MAX_DAILY_LOSS) > 0) await timed('account', () => this.dailyLoss());
+      return null;
+    };
     const t0 = Date.now();
-    let ready = null, ack = null;
+    let ready = null, ack = null, before = [];
     const report = await executeSignal(readOnly, { id: `dry-${t0}`, side: 'flat' }, { ...execConfig(this.env), dryRun: true }, {
-      guard: () => this.guard(),
-      onReady: async () => { ready = Date.now(); await real.openOrders(this.env.MARKET); ack = Date.now() - ready; },
+      guard,
+      onReady: async () => { ready = Date.now(); before = steps.slice(); await real.openOrders(this.env.MARKET); ack = Date.now() - ready; },
     });
-    return ready ? { checks: ready - t0, ack, via: 'rest' } : { stopped: String(report.refused || report.stopped || 'no order path').slice(0, 120) };
+    if (!ready) return { stopped: String(report.refused || report.stopped || 'no order path').slice(0, 120) };
+    return { checks: ready - t0, ack, via: 'rest', steps: before };   // steps up to the moment the order would leave
   }
 
   // /spread (and /spread 7d): the short report. Verdict, now, then p50 / p99 / max over the range.
