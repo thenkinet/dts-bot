@@ -17,7 +17,7 @@ import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
-  TICK_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport } from './market-watch.js';
+  TICK_PREFIX, ORDER_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport } from './market-watch.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -106,8 +106,9 @@ export class Engine extends DurableObject {
     if (url.pathname === '/tick') {
       const k = await request.json();
       const engineAt = Date.now();
+      const dry = await this.dryRun().catch((e) => ({ stopped: String(e.message || e).slice(0, 120) }));   // the order path, timed
       const pd = await takeSample(this.px(), this.env.MARKET, { binance: false }).then((x) => x.pd).catch(() => null);
-      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, delays: tickDelays({ ...k, engineAt }) };
+      const rec = { t: k.edgeAt, src: k.src, price: k.price, pd, dry, delays: tickDelays({ ...k, engineAt }) };
       await st.put(`${TICK_PREFIX}${String(k.edgeAt).padStart(15, '0')}`, rec);
       const stale = [...(await st.list({ prefix: TICK_PREFIX, end: `${TICK_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
       for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
@@ -119,7 +120,8 @@ export class Engine extends DurableObject {
       const since = `${String(Date.now() - days * 86_400_000).padStart(15, '0')}`;
       const ticks = [...(await st.list({ prefix: TICK_PREFIX, start: `${TICK_PREFIX}${since}` })).values()];
       const samples = [...(await st.list({ prefix: SAMPLE_PREFIX, start: `${SAMPLE_PREFIX}${since}` })).values()];
-      return new Response(latencyReport({ ticks, samples, label: days === 7 ? '7d' : '24h' }), { headers: { 'content-type': 'text/plain' } });
+      const orders = [...(await st.list({ prefix: ORDER_PREFIX, start: `${ORDER_PREFIX}${since}` })).values()];
+      return new Response(latencyReport({ ticks, samples, orders, label: days === 7 ? '7d' : '24h' }), { headers: { 'content-type': 'text/plain' } });
     }
     if (url.pathname === '/market') {
       const days = url.searchParams.get('range') === '7d' ? 7 : 1;
@@ -218,7 +220,9 @@ export class Engine extends DurableObject {
         guard: () => this.guard(),                               // before EVERY order (D2, D3)
       });
       report.skipped = skipped;
-      await st.put({ last: report, target: report.target, [`report:${Date.now()}`]: report });
+      await st.put({ last: report, target: report.target, [`report:${Date.now()}`]: report,
+        // timings of this real order, for /latency next to the dry runs
+        [`${ORDER_PREFIX}${String(Date.now()).padStart(15, '0')}`]: { src: sig.source, edgeAt: sig.edgeAt, receivedAt: sig.receivedAt, ...marks, book: undefined } });
       console.log(JSON.stringify({ event: 'engine.executed', report }));
       const fills = report.legs.flatMap((l) => l.fills.map((f) => `${l.side} ${f.size} @ ${f.price} (${f.method}, ${f.slippageBps} bp)`));
       const prices = priceLine(sig, marks, report.legs.flatMap((l) => l.fills), report);
@@ -237,6 +241,28 @@ export class Engine extends DurableObject {
     } finally {
       await st.delete('inflight');
     }
+  }
+
+  // Latency of the order path, without trading: the exact code a real signal runs (same Paradex reads,
+  // same guard), stopped where the order would leave. Then one signed Paradex request, the closest
+  // stand-in for an order's acknowledgement. Two locks keep it read-only: the executor stops before
+  // placeOrder in dry-run mode, and the client it is given refuses any order or cancel.
+  async dryRun() {
+    const real = this.px();
+    const readOnly = new Proxy(real, {
+      get(t, k) {
+        const v = t[k];
+        if (['placeOrder', 'cancelOrder', 'cancelAll'].includes(k)) return async () => { throw new Error('dry run: orders are blocked'); };
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const t0 = Date.now();
+    let ready = null, ack = null;
+    const report = await executeSignal(readOnly, { id: `dry-${t0}`, side: 'flat' }, { ...execConfig(this.env), dryRun: true }, {
+      guard: () => this.guard(),
+      onReady: async () => { ready = Date.now(); await real.openOrders(this.env.MARKET); ack = Date.now() - ready; },
+    });
+    return ready ? { checks: ready - t0, ack, via: 'rest' } : { stopped: String(report.refused || report.stopped || 'no order path').slice(0, 120) };
   }
 
   // /spread (and /spread 7d): the short report. Verdict, now, then p50 / p99 / max over the range.
