@@ -188,6 +188,17 @@ await t('Whole plumbing: dry-run checks and order ack add up; real orders get th
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
+await t('Checks by step: each step in order, a repeated step numbered, the rest as "other"', () => {
+  const c0 = Date.parse('2026-11-27T09:00:00Z');
+  const steps = [['market', 44], ['position', 45], ['book', 43], ['mark', 46], ['book', 44], ['pause', 290], ['account', 47]];
+  const ks = Array.from({ length: 10 }, (_, i) => ({ t: c0 + i * 60_000, pd: { ms: 40 }, dry: { checks: 570, ack: 43, via: 'rest', steps },
+    delays: { closeAt: c0 + i * 60_000, binanceToTv: 330, tvToCloudflare: 880, cloudflareToEngine: 70 } }));
+  ks.push({ t: c0 + 10 * 60_000, pd: { ms: 40 }, dry: { checks: 300, ack: 40, via: 'rest' }, delays: { closeAt: c0 + 10 * 60_000, binanceToTv: 330, tvToCloudflare: 880, cloudflareToEngine: 70 } });
+  const txt = latencyReport({ ticks: ks, samples: [], label: '24h', at: c0 + 10 * 60_000 + 30_000 });
+  assert.match(txt, /Checks by step \(10\)\n\s+p50\s+p99\s+max\nmarket\s+44[^\n]*\nposition\s+45[^\n]*\nbook\s+43[^\n]*\nmark\s+46[^\n]*\nbook 2\s+44[^\n]*\npause\s+290[^\n]*\naccount\s+47[^\n]*\nother\s+11\s/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
+});
+
 await t('Webhooks: missed bar closes counted per tool, rejected or lost alike', () => {
   const c0 = Date.parse('2026-11-26T10:00:00Z');
   const lost = new Set([5, 6, 40]);
