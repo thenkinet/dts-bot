@@ -154,19 +154,38 @@ await t('Latency: end-to-end per tool without its clock; split only when the too
   const barOpen = Date.parse('2026-11-26T10:00:00Z'), close = barOpen + 60_000;
   const d = tickDelays({ barOpen, interval: '1', tvAt: NaN, edgeAt: close + 900, engineAt: close + 970 });
   assert.equal(d.endToEnd, 900); assert.equal(d.binanceToTv, null); assert.equal(d.tvToCloudflare, null);
-  const tv = Array.from({ length: 100 }, (_, i) => ({ t: i, delays: { binanceToTv: 300 + i, tvToCloudflare: 1700 + i, cloudflareToEngine: 70 } }));  // old ticks: no src, no endToEnd
-  const tp = Array.from({ length: 100 }, (_, i) => ({ t: i, src: 'takeprofit', delays: { endToEnd: 900 + i, cloudflareToEngine: 72 } }));
+  const tv = Array.from({ length: 100 }, (_, i) => ({ t: i, pd: { ms: 40 }, delays: { binanceToTv: 300 + i, tvToCloudflare: 1700 + i, cloudflareToEngine: 70 } }));  // old ticks: no src, no endToEnd
+  const tp = Array.from({ length: 100 }, (_, i) => ({ t: i, src: 'takeprofit', pd: { ms: 40 }, delays: { endToEnd: 900 + i, cloudflareToEngine: 72 } }));
   assert.equal(tickSource(tv[0]), 'tradingview');
   const txt = latencyReport({ ticks: [...tv, ...tp], samples: [{ pd: { ms: 41 } }, { pd: { ms: 43 } }], label: '24h', at: Date.parse('2026-11-26T12:40:00Z') });
   assert.match(txt, /^⏱ Latency 24h · 12:40 UTC/);
-  assert.match(txt, /\nTP\s+949\s+998\s+999/);
-  assert.match(txt, /\nTV\s+2098\s+2196\s+2198/);           // derived from trigger + delivery
-  assert.match(txt, /TV split[\s\S]*trigger\s+349/);
+  // total = close -> door + door -> Seoul + the Paradex round trip, until the bot hears back (TP: 949 + 72 + 40)
+  assert.match(txt, /Close → order ack \(ms\)\n\s+p50\s+p99\s+max\nTP\s+1061\s+1110\s+1111\nTV\s+2208\s+2306\s+2308/);
+  assert.match(txt, /TV adds up \(p50 ms\)\n trigger\s+349\n\+ delivery\s+1749\n\+ door → Seoul\s+70\n\+ Seoul ↔ Paradex\s+40\n= about\s+2208/);
+  assert.match(txt, /TP adds up \(p50 ms\)\n close → door\s+949\n/);
+  assert.match(txt, /TV detail[\s\S]*trigger\s+349/);
+  assert.match(txt, /TP detail\s+p50\s+p99\s+max\nto door\s+949\s+998\s+999/);
   assert.match(txt, /minutes: TP 100 · TV 100/);
   assert.doesNotMatch(txt, /TP split/);   // no split for a tool without its own clock
   assert.match(txt, /Clock ✓ fastest 1700 ms/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
   assert.match(latencyReport({ ticks: [], samples: [], label: '24h' }), /No charting-tool ticks yet/);
+});
+
+await t('Whole plumbing: dry-run checks and order ack add up; real orders get their own table', () => {
+  const c0 = Date.parse('2026-11-27T07:00:00Z');
+  const ks = Array.from({ length: 100 }, (_, i) => ({ t: c0 + i * 60_000, pd: { ms: 40 }, dry: { checks: 200 + i, ack: 45, via: 'rest' },
+    delays: { closeAt: c0 + i * 60_000, binanceToTv: 330, tvToCloudflare: 870 + i, cloudflareToEngine: 70 } }));
+  ks.push({ t: c0 + 100 * 60_000, pd: { ms: 40 }, dry: { stopped: 'best price beyond cap' }, delays: { closeAt: c0 + 100 * 60_000, binanceToTv: 330, tvToCloudflare: 900, cloudflareToEngine: 70 } });
+  const orders = [{ edgeAt: 0, receivedAt: 72, start: 90, sent: 330, ack: 380 }];
+  const txt = latencyReport({ ticks: ks, samples: [{ pd: { ms: 40 } }], orders, label: '24h', at: c0 + 100 * 60_000 + 30_000 });
+  // per minute: 330 + (870+i) + 70 + (200+i) + 45 = 1515 + 2i -> p50 (i = 49) 1613
+  assert.match(txt, /Close → order ack \(ms\)\n\s+p50\s+p99\s+max\nTV\s+1613\s+1711\s+1713/);
+  assert.match(txt, /TV adds up \(p50 ms\)\n trigger\s+330\n\+ delivery\s+919\n\+ door → Seoul\s+70\n\+ checks\s+249\n\+ order ack\s+45\n= about\s+1613\n\(via REST · 100\/101 min\)/);
+  assert.match(txt, /checks\s+249\s+298\s+299\norder ack\s+45\s+45\s+45/);
+  assert.match(txt, /\(dry run stopped early: 1\)/);
+  assert.match(txt, /Real orders: 1\n\s+p50\s+p99\s+max\n→ Seoul\s+72[\s\S]*queue\s+18[\s\S]*checks\s+240[\s\S]*order ack\s+50/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
 await t('Webhooks: missed bar closes counted per tool, rejected or lost alike', () => {
