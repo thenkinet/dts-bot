@@ -17,7 +17,8 @@ import { executeSignal, signedPosition, DEFAULTS } from './executor.js';
 import { toInt8, fromInt8, floorToStep, floorToTick, ceilToTick } from './paradex-client.js';
 import { syncDisasterStop, describeStop, DEFAULT_STOP_BPS } from './disaster.js';
 import { takeSample, summarise, describeNow, pingParadex, timedClient, timingLine, priceLine, binanceSymbol, SAMPLE_PREFIX, KEEP_MS,
-  TICK_PREFIX, ORDER_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport } from './market-watch.js';
+  TICK_PREFIX, ORDER_PREFIX, TG_PREFIX, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, latencyReport, moduleReport } from './market-watch.js';
+import { VERSION } from './version.js';
 
 // ---------- small helpers ----------
 const enc = new TextEncoder();
@@ -118,10 +119,23 @@ export class Engine extends DurableObject {
     if (url.pathname === '/latency') {
       const days = url.searchParams.get('range') === '7d' ? 7 : 1;
       const since = `${String(Date.now() - days * 86_400_000).padStart(15, '0')}`;
+      const label = days === 7 ? '7d' : '24h';
       const ticks = [...(await st.list({ prefix: TICK_PREFIX, start: `${TICK_PREFIX}${since}` })).values()];
+      if (!url.searchParams.get('full')) {
+        const tg = [...(await st.list({ prefix: TG_PREFIX, start: `${TG_PREFIX}${since}` })).values()];
+        return new Response(moduleReport({ ticks, tg, label }), { headers: { 'content-type': 'text/plain' } });
+      }
       const samples = [...(await st.list({ prefix: SAMPLE_PREFIX, start: `${SAMPLE_PREFIX}${since}` })).values()];
       const orders = [...(await st.list({ prefix: ORDER_PREFIX, start: `${ORDER_PREFIX}${since}` })).values()];
-      return new Response(latencyReport({ ticks, samples, orders, label: days === 7 ? '7d' : '24h' }), { headers: { 'content-type': 'text/plain' } });
+      return new Response(latencyReport({ ticks, samples, orders, label }), { headers: { 'content-type': 'text/plain' } });
+    }
+    if (url.pathname === '/tg') {
+      // One Telegram command's timings (side path, not the order path). Kept as long as the ticks.
+      const r = await request.json();
+      await st.put(`${TG_PREFIX}${String(Date.now()).padStart(15, '0')}`, { inMs: r.inMs, sendMs: r.sendMs });
+      const stale = [...(await st.list({ prefix: TG_PREFIX, end: `${TG_PREFIX}${String(Date.now() - KEEP_MS).padStart(15, '0')}` })).keys()];
+      for (let i = 0; i < stale.length; i += 128) await st.delete(stale.slice(i, i + 128));
+      return Response.json({ recorded: true });
     }
     if (url.pathname === '/market') {
       const days = url.searchParams.get('range') === '7d' ? 7 : 1;
@@ -451,12 +465,13 @@ const paradex = (env, { kill = false } = {}) => new Paradex({
   interactive: env.PARADEX_INTERACTIVE === 'true',
 });
 
+// Every message ends with the bot's version (the pull request it runs), so it is clear which code sent it.
 async function telegram(env, text, chatId = env.TELEGRAM_CHAT_ID, parseMode) {
   if (!env.TELEGRAM_BOT_TOKEN || !chatId) return false;
   const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, ...(parseMode ? { parse_mode: parseMode } : {}) }),
+    body: JSON.stringify({ chat_id: chatId, text: `${text}\nbot ${VERSION}`, ...(parseMode ? { parse_mode: parseMode } : {}) }),
   });
   return r.ok;
 }
@@ -474,7 +489,7 @@ const COMMANDS = [
   { command: 'status', description: 'Position, limits, last signal' },
   { command: 'check', description: 'Check: tiny order far from the price, cancelled' },
   { command: 'spread', description: 'Paradex health: price vs mark, spread, speed (7d, full)' },
-  { command: 'latency', description: 'Bar close to bot, per charting tool (7d)' },
+  { command: 'latency', description: 'Bar close to order, by module (7d, full)' },
   { command: 'killall', description: 'Halt and cancel every order' },
   { command: 'flatten', description: 'While halted: close positions' },
   { command: 'resume', description: 'Lift the halt' },
@@ -693,6 +708,7 @@ export default {
       // Allowed chat AND allowed sender (review D8): anyone added to the chat cannot command the bot.
       if (String(msg.chat?.id) !== String(env.TELEGRAM_CHAT_ID) || !allowedUsers(env).includes(String(msg.from?.id))) return new Response('ignored');
       const cmd = first;
+      const inAt = Date.now();
       try {
         if (cmd === '/start' || cmd === '/help') {
           await setCommands(env);                                  // refreshes the menu after an update
@@ -713,9 +729,12 @@ export default {
           else await telegram(env, `<pre>${esc(text)}</pre>`, env.TELEGRAM_CHAT_ID, 'HTML');   // fixed-width, so the table lines up
         }
         if (cmd === '/latency') {
-          // /latency: last 24 h. /latency 7d: last 7 days. One row per charting tool.
-          const arg = ((msg.text || '').trim().split(/\s+/)[1] || '').toLowerCase();
-          const text = (await (await engine(env).fetch(`https://engine/latency${arg === '7d' ? '?range=7d' : ''}`)).text()).slice(0, 3500);
+          // /latency: the chain by module, last 24 h. Add 7d for 7 days, full for every detail (both work together).
+          const args = (msg.text || '').trim().toLowerCase().split(/\s+/).slice(1);
+          const q = new URLSearchParams();
+          if (args.includes('7d')) q.set('range', '7d');
+          if (args.includes('full')) q.set('full', '1');
+          const text = (await (await engine(env).fetch(`https://engine/latency${q.toString() ? `?${q}` : ''}`)).text()).slice(0, 3500);
           await telegram(env, `<pre>${esc(text)}</pre>`, env.TELEGRAM_CHAT_ID, 'HTML');
         }
         if (cmd === '/status') {
@@ -740,6 +759,10 @@ export default {
       } catch (e) {
         await telegram(env, `${cmd} FAILED: ${String(e.message || e).slice(0, 300)}`);
       }
+      // Side path timings: command in = Telegram's stamp (to the second) -> here; reply sent = our
+      // answer, from receiving the command to Telegram accepting the reply. Never blocks the reply.
+      const sendMs = Date.now() - inAt, inMs = Number(msg.date) > 0 ? Math.max(0, inAt - Number(msg.date) * 1000) : null;
+      try { await engine(env).fetch('https://engine/tg', { method: 'POST', body: JSON.stringify({ inMs, sendMs }) }); } catch { /* measurement only */ }
       return new Response('ok');
     }
 

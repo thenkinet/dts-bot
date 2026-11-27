@@ -11,6 +11,7 @@
 export const SAMPLE_PREFIX = 'mw:';   // every minute from the engine: Paradex book and response time
 export const TICK_PREFIX = 'tk:';     // every minute from TradingView (/tick): Binance close and the delays
 export const ORDER_PREFIX = 'od:';    // every real order: its timings (queue, checks, sent, acknowledged)
+export const TG_PREFIX = 'tg:';       // every Telegram command: how long it took to arrive, and to answer
 export const KEEP_MS = 7 * 24 * 3_600_000;   // 7 days of minute samples (about 10,000, a few MB)
 
 const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -229,6 +230,82 @@ export function latencyReport({ ticks, samples, orders = [], label, at = Date.no
     const lo = Math.min(...deliv);
     out.push('', lo < 0 ? `Clock ⚠️ tool ${Math.round(-lo)} ms ahead` : `Clock ✓ fastest ${Math.round(lo)} ms`);   // <= 27 wide
   }
+  return out.join('\n');
+}
+
+// ---- /latency (short): the whole chain by module, processing vs delivery ----
+// Processing = time a module spends working; delivery = time on the wire to the next module.
+//   Binance + charting tool: processing = bar close -> the tool fires (Binance's feed and the tool's
+//     script cannot be told apart from outside); delivery = the tool's webhook -> Cloudflare's door.
+//     A tool that sends no firing time gets one combined figure, shown as delivery.
+//   Cloudflare: delivery = door -> engine in Seoul; processing = the pause-flag check (a Cloudflare
+//     object) plus the bot's own work between Paradex requests.
+//   Paradex: every request is a round trip. The fastest round trip of the range counts as delivery
+//     (pure network); anything above it is Paradex processing. Requests: the checks' reads + the ack.
+// Each cell is the p50 over minutes; the headline is the p50 of per-minute totals (they differ a little).
+const p50 = (a) => { const v = a.filter((x) => Number.isFinite(x)).sort((x, y) => x - y); return v.length ? v[Math.max(0, Math.ceil(0.5 * v.length) - 1)] : null; };
+const p99 = (a) => { const v = a.filter((x) => Number.isFinite(x)).sort((x, y) => x - y); return v.length ? v[Math.max(0, Math.ceil(0.99 * v.length) - 1)] : null; };
+const sec = (ms) => (ms == null ? '-' : `${(ms / 1000).toFixed(2)} s`);
+
+export function moduleSplit(k, floor) {
+  const steps = k.dry?.steps;
+  if (!Array.isArray(steps) || !Number.isFinite(k.dry?.checks) || !Number.isFinite(k.dry?.ack)) return null;
+  const pdx = steps.filter(([l]) => l !== 'pause').map(([, v]) => v).concat([k.dry.ack]);
+  const pause = steps.filter(([l]) => l === 'pause').reduce((a, [, v]) => a + v, 0);
+  const other = Math.max(0, k.dry.checks - steps.reduce((a, [, v]) => a + v, 0));
+  const pSum = pdx.reduce((a, b) => a + b, 0), pDel = Math.min(pSum, floor * pdx.length);
+  return { cfProc: pause + other, cfDel: k.delays?.cloudflareToEngine, pxProc: pSum - pDel, pxDel: pDel };
+}
+
+export function moduleReport({ ticks, tg = [], label, at = Date.now() }) {
+  const out = [`⏱ Latency ${label} · ${new Date(at).toISOString().slice(11, 16)} UTC`, ''];
+  const bySrc = {};
+  for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
+  const names = Object.keys(bySrc).sort();
+  if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set a 1-min alert to /tick.']).join('\n');
+  const full = ticks.filter((k) => Array.isArray(k.dry?.steps));
+  const rtts = full.flatMap((k) => k.dry.steps.filter(([l]) => l !== 'pause').map(([, v]) => v).concat([k.dry.ack])).filter((x) => x > 0);
+  const floor = rtts.length ? Math.min(...rtts) : 0;
+  const split = (k) => moduleSplit(k, floor);
+  // Headline per tool: bar close -> Paradex acknowledges, measured whole each minute.
+  out.push('Bar close → order ack');
+  for (const n of names) {
+    const ks = bySrc[n].filter((k) => split(k) && Number.isFinite(e2e(k)));
+    const tot = ks.map((k) => { const m = split(k); return e2e(k) + m.cfDel + m.cfProc + m.pxProc + m.pxDel; });
+    out.push(ks.length ? `${toolName(n).padEnd(4)}${sec(p50(tot)).padStart(7)} · p99 ${sec(p99(tot))}` : `${toolName(n).padEnd(4)} measuring…`);
+  }
+  const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
+  const row = (l, a, b) => `${l.padEnd(11)}${ms(a).padStart(7)}${ms(b).padStart(7)}`;
+  out.push('', `${'Module (ms)'.padEnd(11)}${'proc'.padStart(7)}${'deliv'.padStart(7)}`);
+  // The total row is for the first tool with a complete minute (its tool row + Cloudflare + Paradex).
+  const main = names.find((n) => bySrc[n].some((k) => split(k) && Number.isFinite(e2e(k)))) || names[0];
+  let tp = 0, td = 0;
+  for (const n of names) {
+    const ks = bySrc[n];
+    const hasTs = ks.some((k) => Number.isFinite(k.delays?.tvToCloudflare));
+    const a = hasTs ? p50(ks.map((k) => k.delays?.binanceToTv)) : null;
+    const b = hasTs ? p50(ks.map((k) => k.delays?.tvToCloudflare)) : p50(ks.map(e2e));
+    out.push(row(`Binance+${toolName(n)}`.slice(0, 11), a, b));
+    if (n === main) { tp += a || 0; td += b || 0; }
+  }
+  const ms2 = full.map(split).filter(Boolean);
+  if (ms2.length) {
+    const cfP = p50(ms2.map((m) => m.cfProc)), cfD = p50(ms2.map((m) => m.cfDel));
+    const pxP = p50(ms2.map((m) => m.pxProc)), pxD = p50(ms2.map((m) => m.pxDel));
+    out.push(row('Cloudflare', cfP, cfD), row('Paradex', pxP, pxD));
+    tp += cfP + pxP; td += cfD + pxD;
+    out.push(row(`= ${toolName(main)} total`, tp, td));
+  } else out.push('Cloudflare, Paradex: measuring…');
+  // Side paths: Telegram, not part of the order path.
+  const inMs = tg.map((x) => x.inMs), sendMs = tg.map((x) => x.sendMs);
+  if (tg.length) {
+    out.push('', 'Side path: Telegram (ms)');
+    if (p50(inMs) != null) out.push(`${'command in'.padEnd(16)}${`~${ms(p50(inMs))}`.padStart(7)}`);   // ~: Telegram stamps to the second
+    if (p50(sendMs) != null) out.push(`${'bot answers'.padEnd(16)}${ms(p50(sendMs)).padStart(7)}`);
+  }
+  const up = names.map((n) => { const d = delivery(bySrc[n], at); return d && d.due ? `${toolName(n)} ${(Math.floor((d.got / d.due) * 1000) / 10).toFixed(1)}%` : null; }).filter(Boolean);
+  if (up.length) out.push('', `Up: ${up.join(' · ')}`);
+  out.push(`(p50 · ${full.length} min)`, 'More: /latency full');
   return out.join('\n');
 }
 

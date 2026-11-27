@@ -1,6 +1,6 @@
 // Market watch: summaries, Binance fallback, timing and price lines, and the read-only wrapper.
 import assert from 'node:assert/strict';
-import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource, delivery } from '../src/market-watch.js';
+import { summarise, binanceBook, _resetBinance, timedClient, timingLine, priceLine, describeNow, pingParadex, binanceSymbol, tickDelays, summariseTicks, describeTicks, markGaps, describeMark, shortReport, verdict, latencyReport, tickSource, delivery, moduleReport, moduleSplit } from '../src/market-watch.js';
 
 let fails = 0;
 const t = async (name, fn) => { try { await fn(); console.log(`PASS  ${name}`); } catch (e) { fails++; console.log(`FAIL  ${name}\n      ${e.message}`); } };
@@ -196,6 +196,27 @@ await t('Checks by step: each step in order, a repeated step numbered, the rest 
   ks.push({ t: c0 + 10 * 60_000, pd: { ms: 40 }, dry: { checks: 300, ack: 40, via: 'rest' }, delays: { closeAt: c0 + 10 * 60_000, binanceToTv: 330, tvToCloudflare: 880, cloudflareToEngine: 70 } });
   const txt = latencyReport({ ticks: ks, samples: [], label: '24h', at: c0 + 10 * 60_000 + 30_000 });
   assert.match(txt, /Checks by step \(10\)\n\s+p50\s+p99\s+max\nmarket\s+44[^\n]*\nposition\s+45[^\n]*\nbook\s+43[^\n]*\nmark\s+46[^\n]*\nbook 2\s+44[^\n]*\npause\s+290[^\n]*\naccount\s+47[^\n]*\nother\s+11\s/);
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
+});
+
+await t('By module: processing and delivery per module, adding up to the headline', () => {
+  const c0 = Date.parse('2026-11-27T09:00:00Z');
+  const steps = [['market', 44], ['position', 45], ['book', 38], ['mark', 46], ['book', 44], ['pause', 290], ['account', 47]];
+  const tick = (i) => ({ t: c0 + i * 60_000, pd: { ms: 40 }, dry: { checks: 565, ack: 43, via: 'rest', steps },
+    delays: { closeAt: c0 + i * 60_000, binanceToTv: 327, tvToCloudflare: 884, cloudflareToEngine: 70 } });
+  // Paradex: 7 round trips (6 reads + ack) = 307 ms; the fastest (38) x 7 = 266 delivery, 41 processing.
+  // Cloudflare: pause 290 + other (565 - 554 = 11) = 301 processing, 70 delivery.
+  const m = moduleSplit(tick(0), 38);
+  assert.deepEqual(m, { cfProc: 301, cfDel: 70, pxProc: 41, pxDel: 266 });
+  const ks = Array.from({ length: 31 }, (_, i) => tick(i));
+  ks.push({ t: c0 + 30 * 60_000, src: 'takeprofit', pd: { ms: 40 }, delays: { closeAt: c0 + 30 * 60_000, endToEnd: 950, cloudflareToEngine: 72 } });
+  const txt = moduleReport({ ticks: ks, tg: [{ inMs: 820, sendMs: 140 }], label: '24h', at: c0 + 30 * 60_000 + 30_000 });
+  assert.match(txt, /Bar close → order ack\nTP\s+measuring…\nTV\s+1\.89 s · p99 1\.89 s/);   // 327 + 884 + 70 + 301 + 41 + 266
+  assert.match(txt, /Module \(ms\)\s+proc\s+deliv\nBinance\+TP\s+-\s+950\nBinance\+TV\s+327\s+884\nCloudflare\s+301\s+70\nParadex\s+41\s+266/);
+  assert.match(txt, /command in\s+~820\nbot answers\s+140/);
+  assert.match(txt, /Paradex\s+41\s+266\n= TV total\s+669\s+1220/);   // proc 327+301+41, deliv 884+70+266
+  assert.match(txt, /Up: TP 100\.0% · TV 100\.0%/);
+  assert.match(txt, /More: \/latency full/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
