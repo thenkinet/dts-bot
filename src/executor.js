@@ -39,6 +39,7 @@ export const DEFAULTS = {
   pollMs: 2_000,           // status polling while a maker order rests
   statusPollMs: 250,       // polling while waiting for a final state
   finalTimeoutMs: 5_000,   // longest wait for a final state before the leg stops
+  dryRun: false,           // latency measurement: the full path, stopped just before the order (see send)
 };
 
 const abs = (n) => (n < 0n ? -n : n);
@@ -108,7 +109,8 @@ export async function executeSignal(px, signal, cfgIn = {}, deps = {}) {
 
   let pos = signedPosition(await px.positions(), market);
   const before = pos;
-  const target = targetOf(signal, cfg);
+  // Dry run: aim at a different position from the current one, so the path goes all the way to an order.
+  const target = cfg.dryRun ? (before === 0n ? abs(toInt8(cfg.size)) : 0n) : targetOf(signal, cfg);
   const report = { signalId: signal.id, mode: cfg.mode, market, before: fromInt8(before), target: fromInt8(target), legs: [] };
 
   if (maxPos8 !== null && abs(target) > maxPos8) {
@@ -160,6 +162,8 @@ export async function executeSignal(px, signal, cfgIn = {}, deps = {}) {
   // Every order goes through here: guard (HALT, daily loss) and MAX_POSITION first.
   const send = async (req, leg) => {
     const why = await guard({ leg: leg.name, side: req.side, size: req.size, reduceOnly: leg.reduceOnly });
+    // Dry run: every check is done; the order would leave now. Time that, and stop: no order is sent.
+    if (cfg.dryRun) { if (deps.onReady) await deps.onReady(req); throw new Stop('dry run: stopped before the order'); }
     if (why) throw new Stop(why);
     if (!leg.reduceOnly && maxPos8 !== null) {
       const signed = (req.side === 'BUY' ? 1n : -1n) * toInt8(req.size);
