@@ -332,8 +332,8 @@ export class Engine extends DurableObject {
     lines.push(describeMark('Liquidity, last 24 h', ownAll, limitBps));
     if (now.bn) lines.push(describeNow(now));
     const ticks = [...(await st.list({ prefix: TICK_PREFIX })).values()].filter((k) => k.t > Date.now() - 86_400_000);
-    const last = ticks.at(-1);
-    if (last) lines.push(`Last TradingView tick ${Math.round((Date.now() - last.t) / 1000)} s ago: Binance close ${last.price}.`);
+    const last = ticks.findLast((k) => k.price > 0 && (k.src || 'tradingview') === 'tradingview') || ticks.findLast((k) => k.price > 0);
+    if (last) lines.push(`Last ${last.src || 'tradingview'} tick ${Math.round((Date.now() - last.t) / 1000)} s ago: Binance close ${last.price}.`);
     lines.push(describeTicks('Last hour', summariseTicks(ticks.filter((k) => k.t > Date.now() - 3_600_000))));
     lines.push(describeTicks('Last 24 h', summariseTicks(ticks)));
     const own = ownAll.filter((x) => x.pd);
@@ -665,11 +665,12 @@ export default {
       const barOpen = toMs(body.bar), tvAt = body.ts === undefined || body.ts === '' ? NaN : toMs(body.ts);
       if (!(Math.abs(edgeAt - barOpen) <= 10 * 60_000)) return new Response('stale or missing bar time', { status: 400 });
       if (Number.isFinite(tvAt) && !(Math.abs(edgeAt - tvAt) <= 5 * 60_000)) return new Response('stale ts', { status: 400 });
-      if (!(Number(body.price) > 0)) return new Response('bad price', { status: 400 });
+      const noPrice = body.price === undefined || body.price === null || body.price === '';   // optional (MMT script alerts have none)
+      if (!noPrice && !(Number(body.price) > 0)) return new Response('bad price', { status: 400 });
       const src = String(body.src || 'tradingview').toLowerCase();
       if (!/^[a-z0-9_-]{1,20}$/.test(src)) return new Response('bad src: 1 to 20 of a-z 0-9 _ -', { status: 400 });
       return engine(env).fetch('https://engine/tick', { method: 'POST', body: JSON.stringify({
-        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: Number(body.price), edgeAt, edgeColo: request.cf?.colo,
+        src, tvAt, barOpen, interval: String(body.tf ?? '1'), price: noPrice ? null : Number(body.price), edgeAt, edgeColo: request.cf?.colo,
         // where the tool's webhook comes from (Cloudflare's own lookup of the sender's address): information only
         from: { org: request.cf?.asOrganization, city: request.cf?.city, country: request.cf?.country, colo: request.cf?.colo } }) });
     }

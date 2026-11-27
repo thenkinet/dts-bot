@@ -211,12 +211,11 @@ await t('By module: processing and delivery per module, adding up to the headlin
   const ks = Array.from({ length: 31 }, (_, i) => tick(i));
   ks.push({ t: c0 + 30 * 60_000, src: 'takeprofit', pd: { ms: 40 }, delays: { closeAt: c0 + 30 * 60_000, endToEnd: 950, cloudflareToEngine: 72 } });
   const txt = moduleReport({ ticks: ks, tg: [{ inMs: 820, sendMs: 140 }], label: '24h', at: c0 + 30 * 60_000 + 30_000 });
-  assert.match(txt, /Bar close → order ack\nTP\s+measuring…\nTV\s+1\.89 s · p99 1\.89 s/);   // 327 + 884 + 70 + 301 + 41 + 266
-  assert.match(txt, /Module \(ms\)\s+proc\s+deliv\nBinance\+TP\s+-\s+-\nBinance\+TV\s+327\s+884\nCloudflare\s+301\s+70\nParadex\s+41\s+266/);
-  assert.match(txt, /command in\s+~820\nbot answers\s+140/);
-  assert.match(txt, /Paradex\s+41\s+266\n= TV total\s+669\s+1220/);   // proc 327+301+41, deliv 884+70+266
-  assert.match(txt, /Up: TP 100\.0% · TV 100\.0%/);
-  assert.match(txt, /More: \/latency full/);
+  assert.match(txt, /Close → order ack \(s\)\nTool\s+p50\s+p99\s+up\nTP\s+…\s+100%\nTV\s+1\.89\s+1\.89\s+100%/);   // 327 + 884 + 70 + 301 + 41 + 266
+  assert.match(txt, /Module ms\s+proc\s+deliv\nTP\*\s+-\s+-\nTV\*\s+327\s+884\nCF\s+301\s+70\nParadex\s+41\s+266/);
+  assert.match(txt, /TG ms: in ~820 · out 140/);
+  assert.match(txt, /Paradex\s+41\s+266\n= TV\s+669\s+1220\n\* incl\. Binance feed/);   // proc 327+301+41, deliv 884+70+266
+  assert.match(txt, /31 min · \/latency full$/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
@@ -230,10 +229,10 @@ await t('Same minutes everywhere, and a race on the bar closes both tools delive
   // TakeProfit: the same 10 bar closes, 1500 ms to the door, except one minute at 2100.
   const tp = Array.from({ length: 10 }, (_, i) => ({ t: c0 + i * 60_000 + 1, src: 'takeprofit', pd: { ms: 40 }, dry, delays: { closeAt: c0 + i * 60_000, endToEnd: i === 3 ? 2100 : 1500, cloudflareToEngine: 70 } }));
   const txt = moduleReport({ ticks: [...old, ...tv, ...tp], label: '24h', at: c0 + 10 * 60_000 + 30_000 });
-  assert.match(txt, /Binance\+TV\s+300\s+1700/);           // the same 10 minutes as the headline, not the 1000 old ones
-  assert.match(txt, /Binance\+TP\s+-\s+1500/);
-  assert.match(txt, /Race: same bar closes\nTP vs TV\s+10 min\nTP first\s+9\/10\nTP lead p50\s+\+500 ms/);
-  assert.match(txt, /\(p50 · 20 min\)/);
+  assert.match(txt, /TV\*\s+300\s+1700/);           // the same 10 minutes as the headline, not the 1000 old ones
+  assert.match(txt, /TP\*\s+-\s+1500/);
+  assert.match(txt, /Race vs TV · same bars\nlead ms: \+ faster, - slower\nTool\s+won\s+lead\nTP\s+9\/10\s+\+500\n/);
+  assert.match(txt, /\n20 min · /);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
 
@@ -248,13 +247,14 @@ await t('OpenMarket payload translated into a tick; anything else left alone', (
 });
 
 await t('Sent from: cloud provider and city of each tool, from its latest webhook', () => {
-  assert.equal(cloudName('Amazon.com, Inc.'), 'AWS'); assert.equal(cloudName('Google LLC'), 'Google'); assert.equal(cloudName(undefined), null);
+  assert.equal(cloudName('Amazon.com, Inc.'), 'AWS'); assert.equal(cloudName('Google LLC'), 'GCP'); assert.equal(cloudName('Hetzner Online GmbH'), 'HTZ'); assert.equal(cloudName(undefined), null);
   const c0 = Date.parse('2026-11-27T12:00:00Z');
   const steps = [['market', 40], ['pause', 250]];
   const tick = (src, from) => ({ t: c0, src, dry: { checks: 300, ack: 40, steps }, from, delays: { closeAt: c0, endToEnd: 1000, cloudflareToEngine: 70 } });
   const txt = moduleReport({ ticks: [tick('openmarket', { org: 'Amazon.com, Inc.', city: 'Singapore', country: 'SG', colo: 'SIN' }),
+    tick('mmt', { org: 'Hetzner Online GmbH', city: 'Falkenstein/Vogtland Region', country: 'DE' }),
     tick('tradingview', { org: 'Amazon.com, Inc.', city: 'Ashburn', country: 'US', colo: 'IAD' }), tick('takeprofit', undefined)], label: '24h', at: c0 + 30_000 });
-  assert.match(txt, /Sent from\nOM  AWS · Singapore · SG\nTV  AWS · Ashburn · US\n/);
+  assert.match(txt, /From\nMMT HTZ Falkenstein\/Vogt DE\nOM  AWS Singapore SG\nTV  AWS Ashburn US\n/);   // a long city is cut, the country kept
   assert.doesNotMatch(txt, /TP  AWS/);
   assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
 });
@@ -292,6 +292,34 @@ await t('Webhooks: 5 or more missing minutes in a row = alert off, kept out of t
   // the alert stopped 10 minutes ago and is still off: say so
   const now = latencyReport({ ticks: ks.slice(0, -10), samples: [], label: '24h', at });
   assert.match(now, /TV off since 13:50 ⚠️/);
+});
+
+await t('Tests and timer alerts are kept out; the total row follows TradingView, else the tool with most minutes', () => {
+  const c0 = Date.parse('2026-11-27T14:00:00Z');
+  const dry = { checks: 300, ack: 40, via: 'rest', steps: [['market', 40], ['pause', 250]] };
+  const k = (src, i, d) => ({ t: c0 + i * 60_000, src, dry, delays: { closeAt: c0 + i * 60_000, cloudflareToEngine: 70, ...d } });
+  // MMT: 3 real closes, a timer alert (fired 13 s BEFORE the close it names), a send test off the minute
+  const mmt = [0, 1, 2].map((i) => k('mmt', i, { binanceToTv: 300, tvToCloudflare: 900 }));
+  mmt.push(k('mmt', 3, { binanceToTv: -13_000, tvToCloudflare: 900 }));
+  mmt.push({ ...k('mmt', 4, { binanceToTv: 300, tvToCloudflare: 900 }), delays: { closeAt: c0 + 4 * 60_000 + 25_000, binanceToTv: 300, tvToCloudflare: 900, cloudflareToEngine: 70 } });
+  mmt.push(k('mmt', 5, { binanceToTv: 45_000, tvToCloudflare: 900 }));            // fired 45 s late: not a bar-close alert
+  const om = [0, 1].map((i) => k('openmarket', i, { binanceToTv: 600, tvToCloudflare: 700 }));
+  const txt = moduleReport({ ticks: [...mmt, ...om], label: '24h', at: c0 + 2 * 60_000 + 30_000 });
+  assert.match(txt, /\nMMT\s+[\d.]+\s+[\d.]+\s+100%\n/);
+  assert.match(txt, /Race vs MMT · same bars\nlead ms: \+ faster, - slower\nTool\s+won\s+lead\nOM\s+0\/2\s+-100\n/);   // no TV: the tool with most minutes
+  assert.match(txt, /= MMT\s/);
+  assert.match(txt, /\n5 min · /);                                                // 3 MMT + 2 OM, the 3 fakes left out
+  assert.ok(txt.split('\n').every((l) => [...l].length <= 27), 'fits a phone');
+  const tv = [0, 1].map((i) => k('tradingview', i, { binanceToTv: 300, tvToCloudflare: 1300 }));
+  assert.match(moduleReport({ ticks: [...mmt, ...tv], label: '24h', at: c0 + 2 * 60_000 + 30_000 }), /= TV\s/);   // TV even with fewer minutes
+});
+
+await t('An alert that is off right now is flagged under the headline', () => {
+  const c0 = Date.parse('2026-11-27T14:00:00Z');
+  const dry = { checks: 300, ack: 40, via: 'rest', steps: [['market', 40], ['pause', 250]] };
+  const ks = Array.from({ length: 5 }, (_, i) => ({ t: c0 + i * 60_000, src: 'openmarket', dry, delays: { closeAt: c0 + i * 60_000, binanceToTv: 600, tvToCloudflare: 700, cloudflareToEngine: 70 } }));
+  const txt = moduleReport({ ticks: ks, label: '24h', at: c0 + 20 * 60_000 + 30_000 });
+  assert.match(txt, /\nOM\s+[\d.]+\s+[\d.]+\s+100%\n⚠️ OM off since 14:05\n/);
 });
 
 if (fails) { console.log(`\n${fails} FAILED`); process.exit(1); } else console.log('\nall market-watch tests passed');
