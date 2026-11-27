@@ -10,6 +10,7 @@
 
 export const SAMPLE_PREFIX = 'mw:';   // every minute from the engine: Paradex book and response time
 export const TICK_PREFIX = 'tk:';     // every minute from TradingView (/tick): Binance close and the delays
+export const ORDER_PREFIX = 'od:';    // every real order: its timings (queue, checks, sent, acknowledged)
 export const KEEP_MS = 7 * 24 * 3_600_000;   // 7 days of minute samples (about 10,000, a few MB)
 
 const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -119,7 +120,7 @@ export function delivery(ks, at = Date.now()) {
   return { due: all - offN, got: all - offN - missed.length, missed, off, offNow: Boolean(off.length && off.at(-1).to === last) };
 }
 
-export function latencyReport({ ticks, samples, label, at = Date.now() }) {
+export function latencyReport({ ticks, samples, orders = [], label, at = Date.now() }) {
   const P = (a, p) => (a.length ? [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.max(0, Math.ceil(p * a.length) - 1))] : null);
   const ms = (x) => (x == null || !Number.isFinite(x) ? '-' : String(Math.round(x)));
   const line = (name, vals) => `${name.padEnd(9).slice(0, 9)}${ms(P(vals, 0.5)).padStart(6)}${ms(P(vals, 0.99)).padStart(6)}${ms(vals.length ? Math.max(...vals) : null).padStart(6)}`;
@@ -129,13 +130,40 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
   for (const k of ticks) (bySrc[tickSource(k)] ||= []).push(k);
   const names = Object.keys(bySrc).sort();
   if (!names.length) return out.concat(['No charting-tool ticks yet.', 'Set a 1-min alert to /tick.']).join('\n');
-  out.push('Bar close → bot (ms)', head(''));
+  // Total per minute, the whole plumbing: bar close -> Cloudflare door -> Seoul -> the bot's checks
+  // before an order (the dry run: the real order path, stopped before the order) -> Paradex answers a
+  // signed request (stand-in for the order's acknowledgement). Ticks from before the dry run existed
+  // use the plain Paradex round trip instead. Percentiles are taken on the per-minute totals:
+  // p99s and maxes of the legs do not add up, p50s roughly do.
+  const hasDry = (k) => Number.isFinite(k.dry?.checks) && Number.isFinite(k.dry?.ack);
+  const total = (k) => {
+    const a = e2e(k), b = k.delays?.cloudflareToEngine, c = hasDry(k) ? k.dry.checks + k.dry.ack : k.pd?.ms;
+    return Number.isFinite(a) && Number.isFinite(b) && Number.isFinite(c) ? a + b + c : null;
+  };
+  out.push('Close → order ack (ms)', head(''));
   const counts = [];
   for (const n of names) {
-    const v = bySrc[n].map(e2e).filter((x) => Number.isFinite(x));
-    out.push(line(toolName(n), v)); counts.push(`${toolName(n)} ${v.length}`);
+    out.push(line(toolName(n), bySrc[n].map(total).filter((x) => Number.isFinite(x))));
+    counts.push(`${toolName(n)} ${bySrc[n].filter((k) => Number.isFinite(e2e(k))).length}`);
   }
   out.push(`(minutes: ${counts.join(' · ')})`);
+  // How the typical total adds up, leg by leg (p50 of each leg).
+  const med = (vals) => P(vals.filter((x) => Number.isFinite(x)), 0.5);
+  const add = (label, v) => `${label.padEnd(17)}${ms(v).padStart(6)}`;
+  for (const n of names) {
+    const ks = bySrc[n], split = ks.some((k) => Number.isFinite(k.delays?.tvToCloudflare));
+    const legs = split
+      ? [[' trigger', med(ks.map((k) => k.delays?.binanceToTv))], ['+ delivery', med(ks.map((k) => k.delays?.tvToCloudflare))]]
+      : [[' close → door', med(ks.map(e2e))]];
+    legs.push(['+ door → Seoul', med(ks.map((k) => k.delays?.cloudflareToEngine))]);
+    const dk = ks.filter(hasDry);
+    if (dk.length) legs.push(['+ checks', med(dk.map((k) => k.dry.checks))], ['+ order ack', med(dk.map((k) => k.dry.ack))]);
+    else legs.push(['+ Seoul ↔ Paradex', med(ks.map((k) => k.pd?.ms))]);
+    if (legs.some(([, v]) => v == null)) continue;
+    out.push('', `${toolName(n)} adds up (p50 ms)`, ...legs.map(([l, v]) => add(l, v)), add('= about', legs.reduce((x, [, v]) => x + v, 0)));
+    const via = dk.at(-1)?.dry.via;
+    if (dk.length) out.push(`(via ${String(via || '?').toUpperCase()}${dk.length < ks.length ? ` · ${dk.length}/${ks.length} min` : ''})`);
+  }
   const dv = names.map((n) => [n, delivery(bySrc[n], at)]).filter(([, d]) => d && (d.due || d.off.length));
   if (dv.length) {
     const hm = (ms) => new Date(ms).toISOString().slice(11, 16);
@@ -152,17 +180,31 @@ export function latencyReport({ ticks, samples, label, at = Date.now() }) {
       else if (d.off.length) out.push(`${t} off ${d.off.reduce((a, r) => a + r.n, 0)}m · ${d.off.length} gaps`);
     }
   }
-  for (const n of names.filter((x) => bySrc[x].some((k) => Number.isFinite(k.delays?.tvToCloudflare)))) {
+  for (const n of names) {
     const ks = bySrc[n].filter((k) => Number.isFinite(k.delays?.tvToCloudflare));
-    out.push('', head(`${toolName(n)} split`));
-    out.push(line('trigger', ks.map((k) => k.delays.binanceToTv).filter((x) => Number.isFinite(x))));
-    out.push(line('delivery', ks.map((k) => k.delays.tvToCloudflare)));
+    out.push('', head(`${toolName(n)} detail`));
+    if (ks.length) {
+      out.push(line('trigger', ks.map((k) => k.delays.binanceToTv).filter((x) => Number.isFinite(x))));
+      out.push(line('delivery', ks.map((k) => k.delays.tvToCloudflare)));
+    } else out.push(line('to door', bySrc[n].map(e2e).filter((x) => Number.isFinite(x))));
   }
   const hop = ticks.map((k) => k.delays?.cloudflareToEngine).filter((x) => Number.isFinite(x));
   const pdx = samples.map((s) => s.pd?.ms).filter((x) => Number.isFinite(x));
+  const dry = ticks.filter(hasDry);
   out.push('', head('Bot'));
   if (hop.length) out.push(line('→ Seoul', hop));
+  if (dry.length) out.push(line('checks', dry.map((k) => k.dry.checks)), line('order ack', dry.map((k) => k.dry.ack)));
   if (pdx.length) out.push(line('↔ Paradex', pdx));
+  const stopped = ticks.filter((k) => k.dry?.stopped).length;
+  if (stopped) out.push(`(dry run stopped early: ${stopped})`);
+  // Real orders: the same legs, measured on the real thing.
+  const od = orders.filter((o) => Number.isFinite(o.start));
+  if (od.length) {
+    const v = (f) => od.map(f).filter((x) => Number.isFinite(x) && x >= 0);
+    out.push('', `Real orders: ${od.length}`, head(''));
+    out.push(line('→ Seoul', v((o) => o.receivedAt - o.edgeAt)), line('queue', v((o) => o.start - o.receivedAt)));
+    out.push(line('checks', v((o) => o.sent - o.start)), line('order ack', v((o) => o.ack - o.sent)));
+  }
   const deliv = ticks.map((k) => k.delays?.tvToCloudflare).filter((x) => Number.isFinite(x));
   if (deliv.length) {
     const lo = Math.min(...deliv);

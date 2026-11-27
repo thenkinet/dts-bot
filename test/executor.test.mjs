@@ -193,5 +193,19 @@ const base = { market: 'BTC-USD-PERP', size: '0.01', maxSlippageBps: 20, pollMs:
   check('mark guard: nothing to do needs no mark', r4.ok && r4.note === 'already at target');
 }
 
+// 20. Dry run (latency measurement): the whole path, guard included, then stops before any order
+{
+  const px = new FakeParadex({ bid: 100, ask: 100.5 });
+  let ready = null, guarded = 0;
+  const deps = { ...fakeClock(px), guard: async () => { guarded++; return 'HALTED'; }, onReady: async (req) => { ready = req; } };
+  const r = await executeSignal(px, { id: 'dry', side: 'flat' }, { ...base, mode: 'taker', maxSlippageBps: 50, dryRun: true }, deps);
+  check('dry run: no order sent, even with the bot halted', px.sent.length === 0);
+  check('dry run: flat aims long, guard checked, then ready', ready && ready.side === 'BUY' && guarded === 1 && /dry run/.test(r.stopped));
+  const lp = new FakeParadex({ bid: 100, ask: 100.5 }); lp.pos = 0.01;
+  let ready2 = null;
+  await executeSignal(lp, { id: 'dry2', side: 'long' }, { ...base, mode: 'taker', maxSlippageBps: 50, dryRun: true }, { ...fakeClock(lp), onReady: async (req) => { ready2 = req; } });
+  check('dry run: a long position aims flat (reduce-only), still no order', lp.sent.length === 0 && ready2 && ready2.side === 'SELL');
+}
+
 console.log(fail ? `\n${fail} executor check(s) failed` : '\nAll executor checks passed');
 process.exit(fail ? 1 : 0);
