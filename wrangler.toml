@@ -7,7 +7,7 @@ workers_dev = true
 [vars]
 PARADEX_ENV = "prod"             # real Paradex (the testnet could not fund new accounts in Nov 2026); tiny limits below
 MARKET = "BTC-USD-PERP"
-PARADEX_INTERACTIVE = "true"     # Retail token: zero fees, RPI liquidity (Track A, taker method)
+PARADEX_INTERACTIVE = "false"    # Pro (normal API) orders: no 300 ms speed bump, 800 orders/s; Pro fees (maker 0.5 bp, taker 4.5 bp). "true" = Retail: zero fees, RPI, 300 ms bump, 1,000 orders/day
 ENGINE_REGION = "apac"           # run the engine in Asia-Pacific, near Paradex. Change only when flat.
 
 # Telegram: TELEGRAM_CHAT_ID and TELEGRAM_USER_IDS (comma-separated) are set as Cloudflare
